@@ -1,1 +1,1983 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>World (Fast)</title>
+<style>
+  body { margin: 0; overflow: hidden; background: #000; cursor: crosshair; }
+  #crosshair { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); pointer-events:none; }
+  #crosshair::before,#crosshair::after { content:""; position:absolute; background:white; box-shadow:0 0 2px black; }
+  #crosshair::before { width:20px; height:2px; top:-1px; left:-10px; }
+  #crosshair::after  { width:2px; height:20px; top:-10px; left:-1px; }
+  #hud { position:absolute; top:12px; left:12px; color:white; font:13px/2.2 monospace; text-shadow:1px 1px 3px #000; pointer-events:none; }
+  #wind { position:absolute; top:12px; right:12px; color:white; font:12px/1.5 monospace; text-shadow:1px 1px 3px #000; pointer-events:none; text-align:right; background:rgba(0,0,0,0.22); padding:8px 10px; border-radius:8px; min-width:140px; }
+  #wind .label { opacity:0.7; font-size:11px; }
+  #hint { position:absolute; bottom:72px; left:50%; transform:translateX(-50%); color:rgba(255,255,255,0.8); font:12px monospace; text-shadow:1px 1px 2px #000; pointer-events:none; text-align:center; }
+  #overlay { position:absolute; inset:0; background:rgba(0,0,0,.65); color:white; font:24px monospace; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; }
+  #overlay p { margin:0; font-size:14px; opacity:.7; max-width:400px; text-align:center; }
+  #hotbar { position:absolute; bottom:12px; left:50%; transform:translateX(-50%); display:flex; gap:8px; pointer-events:none; }
+  .slot { width:62px; height:68px; border:2px solid rgba(255,255,255,0.35); border-radius:6px; display:flex; flex-direction:column; align-items:center; justify-content:center; font:10px monospace; color:white; text-shadow:1px 1px 2px #000; background:rgba(0,0,0,0.5); gap:3px; }
+  .slot.active { border-color:white; background:rgba(255,255,255,0.18); box-shadow:0 0 8px rgba(255,255,255,0.5); }
+  .slot.empty .slot-swatch { background: repeating-linear-gradient(45deg,#333 0,#333 4px,#222 4px,#222 8px) !important; opacity:0.5; }
+  .slot-swatch { width:30px; height:30px; border-radius:4px; border:1px solid rgba(0,0,0,0.5); }
+  .slot-num { opacity:0.55; font-size:9px; }
+  #errorDisplay { position:absolute; bottom:100px; left:12px; color:#ff4444; font:11px monospace; text-shadow:1px 1px 2px #000; background:rgba(0,0,0,0.7); padding:4px 8px; border-radius:5px; display:none; z-index:10; }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.2} }
+  .tornado-warn { color:#ffff00; animation:blink 0.4s infinite; font-weight:bold; }
+  .admin-console { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); background:rgba(0,0,0,0.9); color:white; font:12px monospace; padding:20px; border-radius:8px; display:none; z-index:1000; max-width:400px; }
+  .admin-console input { width:100%; margin:5px 0; }
+  .admin-console button { margin:5px; }
 
+</style>
+</head>
+<body>
+<div id="crosshair"></div>
+<div id="hud"></div>
+<div id="wind"></div>
+<div id="hint">Left-click: break/hit animal &nbsp;|&nbsp; Right-click: place/eat meat &nbsp;|&nbsp; Walk drops to pickup &nbsp;|&nbsp; 1–6 slots &nbsp;|&nbsp; T tornado &nbsp;|&nbsp; / admin</div>
+<div id="hotbar"></div>
+<div id="fps">FPS —</div>
+<div id="errorDisplay"></div>
+<button class="audio-btn" id="audioBtn">🔇 Sound OFF</button>
+<div id="adminConsole" class="admin-console">
+  <h3>Admin Console</h3>
+  <input id="adminInput" type="text" placeholder="Enter command...">
+  <button id="adminSubmit">Execute</button>
+  <button id="adminClose">Close</button>
+  <div id="adminOutput"></div>
+</div>
+<div id="overlay">🌍 Click to Play
+  <p>WASD move · Space jump · Left-click break block or hit animal · Right-click place/eat meat<br>Walk near a drop to auto-pickup · Right-click water to drink · 1-6 switch slot · T tornado · ESC release</p>
+</div>
+
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js","three/examples/jsm/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}
+</script>
+<script type="module">
+import * as THREE from "three";
+import { PointerLockControls } from "three/examples/jsm/controls/PointerLockControls.js";
+import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
+
+// ─── Helpers ────────────────────────────────────────────────────────────
+const lerp = (a, b, t) => a + (b - a) * t;
+const clamp = (v, lo, hi) => v < lo ? lo : v > hi ? hi : v;
+
+// ─── Config ─────────────────────────────────────────────────────────────
+const CFG = {
+  WORLD_SIZE:    128,
+  WATER_LVL:       2,
+
+  WALK_SPD:        8, WATER_SLOW: 0.5,
+  JUMP:            9, GRAVITY: 32, W_GRAV: 3, W_BUOY: 4,
+  REACH:           4,
+
+  HUNGER_DRAIN:  0.3, THIRST_DRAIN: 0.45, STARVE: 3, DEHYDRATE: 2,
+  DAY_LEN:       300, START_T: 10, SUN_D: 160,
+
+  WIND_BASE_MAX:   4, WIND_GUST_MAX: 28,
+  WIND_CHANGE_MIN: 2.5, WIND_CHANGE_MAX: 7.0,
+  GUST_CHANCE: 0.10, GUST_MIN: 14, GUST_SPREAD: 14,
+  WIND_DIR_LERP: 0.25, WIND_SPEED_LERP: 0.90,
+  WIND_DIRIFT: 0.06, WIND_GUST_DRIFT: 0.08,
+  WIND_AIR_PUSH: 0.03, WIND_AIR_GUST: 0.055,
+  WIND_LIFT_BASE: 0.02, WIND_LIFT_GUST: 0.12,
+
+  PLAYER_WEIGHT: 12,
+  ROOT_MULT:    0.75,
+  // 0 grass 1 water 2 dirt 3 stone 4 sand 5 wood 6 leaves 7 coal 8 root 9 snow 10 ice
+  BLOCK_WEIGHTS: [1.00, 0.00, 1.15, 1.80, 1.05, 2.20, 0.35, 2.85, 1.60, 0.55, 1.40],
+
+  SHELTER_RADIUS: 1, SHELTER_HEIGHTS: [0, 1, 2],
+  SHELTER_SCAN_DEPTH: 7, SHELTER_LEAK_START: 12,
+  SHELTER_LEAK_RANGE: 8, SHELTER_LEAK_FACTOR: 0.45,
+
+  TREE_SWAY_BASE: 0.018, TREE_SWAY_RATE: 1.8, TREE_SWAY_WIND: 0.12,
+  TRUNK_BEND_START: 0.25, TRUNK_BEND_END: 0.75,
+  ROOT_BEND_START: 0.08,  ROOT_BEND_END:  0.15,
+  LEAF_BEND_START: 0.80,  LEAF_BEND_END:  0.90,
+  LEAF_WOBBLE_MULT: 0.80, LEAF_WOBBLE_RATE: 1.35, LEAF_WOBBLE_STEP: 0.40,
+
+  FALL_THRESHOLD: 14, FALL_MULT: 0.10,
+  LEAF_FALL_DRAG: 0.80, LEAF_TERM_VEL: 5,
+
+  WIND_LIFT_BLOCK_MULT: 3.5,
+  WIND_BLOCK_SCAN_INTERVAL: 0.25,
+
+  TORNADO_SPAWN_INTERVAL_MIN: 120, TORNADO_SPAWN_INTERVAL_MAX: 300,
+  TORNADO_STRENGTH_MIN: 55, TORNADO_STRENGTH_MAX: 95,
+  TORNADO_LIFETIME_MIN: 35, TORNADO_LIFETIME_MAX: 80,
+  TORNADO_SPEED: 5.5, TORNADO_RADIUS_BASE: 9,
+  TORNADO_LIFT_INTERVAL: 0.12,
+
+  TERRAIN_SCALE: 0.016, TERRAIN_OCTAVES: 6,
+  TERRAIN_HEIGHT: 38, TERRAIN_SEA_OFFSET: 4,
+  BIOME_SCALE: 0.006,
+
+  TREE_REFRESH_THROTTLE: 0.20, // s — minimum gap between refreshTree() runs per tree
+  HUD_UPDATE_INTERVAL:   0.10, // s — DOM HUD refresh cadence
+};
+
+// ─── Integer-packed coordinate keys ────────────────────────────────────
+// World is 128×128 in X/Z; Y bounded roughly -16..239 with bias.
+// key = (y + Y_BIAS) * (WS*WS) + z * WS + x   →  fits comfortably in 32-bit int
+const WS = CFG.WORLD_SIZE;
+const Y_BIAS = 16;
+const Z_STRIDE = WS;
+const Y_STRIDE = WS * WS;
+const ikey = (x, y, z) => (y + Y_BIAS) * Y_STRIDE + z * Z_STRIDE + x;
+// 6-neighbour offsets in packed-key space (x±, y±, z±)
+const NB = [1, -1, Y_STRIDE, -Y_STRIDE, Z_STRIDE, -Z_STRIDE];
+
+// ─── Noise functions ───────────────────────────────────────────────────
+function hash2d(x, z, seed) {
+  let h = (Math.imul(x, 1619) ^ Math.imul(z, 31337) ^ Math.imul(seed|0, 1234567)) | 0;
+  h = Math.imul(h ^ (h >>> 13), 0x45d9f3b);
+  h = Math.imul(h ^ (h >>> 17), 0x119de1f3);
+  h ^= h >>> 16;
+  return ((h >>> 0) / 4294967295);
+}
+function hash3s(x, y, z, s) {
+  let h = (Math.imul(x,374761393) ^ Math.imul(y,668265263) ^ Math.imul(z,2147483647) ^ Math.imul(s|0,1000003)) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  h ^= h >>> 16;
+  return ((h >>> 0) / 4294967295);
+}
+function smooth2d(x, z, seed) {
+  const ix = Math.floor(x), iz = Math.floor(z);
+  const fx = x - ix, fz = z - iz;
+  const ux = fx * fx * (3 - 2 * fx), uz = fz * fz * (3 - 2 * fz);
+  return lerp(
+    lerp(hash2d(ix, iz, seed), hash2d(ix+1, iz, seed), ux),
+    lerp(hash2d(ix, iz+1, seed), hash2d(ix+1, iz+1, seed), ux),
+    uz
+  );
+}
+function fbm2d(x, z, octaves) {
+  let v = 0, a = 0.5, f = 1.0, max = 0;
+  for (let i = 0; i < octaves; i++) {
+    v += smooth2d(x*f, z*f, i*9371) * a;
+    max += a; a *= 0.5; f *= 2.07;
+  }
+  return v / max;
+}
+function smooth3d(x, y, z, s) {
+  const ix=Math.floor(x), iy=Math.floor(y), iz=Math.floor(z);
+  const fx=x-ix, fy=y-iy, fz=z-iz;
+  const ux=fx*fx*(3-2*fx), uy=fy*fy*(3-2*fy), uz=fz*fz*(3-2*fz);
+  const h=(dx,dy,dz)=>hash3s(ix+dx,iy+dy,iz+dz,s);
+  return lerp(
+    lerp(lerp(h(0,0,0),h(1,0,0),ux), lerp(h(0,1,0),h(1,1,0),ux), uy),
+    lerp(lerp(h(0,0,1),h(1,0,1),ux), lerp(h(0,1,1),h(1,1,1),ux), uy),
+    uz
+  );
+}
+
+// ─── Terrain ───────────────────────────────────────────────────────────
+function groundH(x, z) {
+  const s = CFG.TERRAIN_SCALE;
+  const wx = x + smooth2d(x*s*0.5+33.7, z*s*0.5+91.3, 7777) * 12;
+  const wz = z + smooth2d(x*s*0.5+82.1, z*s*0.5+14.9, 8888) * 12;
+  const n = fbm2d(wx*s, wz*s, CFG.TERRAIN_OCTAVES);
+  const r = 1.0 - Math.abs(n - 0.6) * 3.5;
+  const combined = n * 0.8 + Math.max(0, r) * 0.2;
+  return Math.max(0, Math.floor(combined * CFG.TERRAIN_HEIGHT - CFG.TERRAIN_SEA_OFFSET));
+}
+function biomeAt(x, z) { return smooth2d(x * CFG.BIOME_SCALE, z * CFG.BIOME_SCALE, 5555); }
+function isCave(x, y, z) {
+  const n1 = smooth3d(x*0.09, y*0.14, z*0.09, 0);
+  const n2 = smooth3d(x*0.09, y*0.14, z*0.09, 997);
+  return (Math.abs(n1 - 0.5) < 0.115) && (Math.abs(n2 - 0.5) < 0.115);
+}
+
+// ─── Block defs (object + flat arrays for hot-path access) ─────────────
+const BLOCK_DEFS = [
+  { name:'Grass',    color:0x4cc444, solid:true,  landMult:1.00 },
+  { name:'Water',    color:0x1a6ddd, solid:false, transparent:true,  opacity:0.72, landMult:0.00 },
+  { name:'Dirt',     color:0x8B5E3C, solid:true,  landMult:0.85 },
+  { name:'Stone',    color:0x8a8a8a, solid:true,  landMult:1.60 },
+  { name:'Sand',     color:0xd9c472, solid:true,  landMult:0.50 },
+  { name:'Wood',     color:0x6b4226, solid:true,  landMult:1.10 },
+  { name:'Leaves',   color:0x2d8a2d, solid:true,  transparent:true,  opacity:0.88, landMult:0.15 },
+  { name:'Coal',     color:0x2a2a2a, solid:true,  landMult:1.40 },
+  { name:'Root',     color:0x5a3b21, solid:true,  transparent:true,  opacity:0.9,  landMult:0.75 },
+  { name:'Snow',     color:0xeef4ff, solid:true,  landMult:0.60 },
+  { name:'Ice',      color:0xaaddff, solid:true,  transparent:true,  opacity:0.85, landMult:0.30 },
+  { name:'RawMeat',  color:0xcc3322, solid:false, landMult:0.00 }, // type 11 — item only, not placed in world
+];
+const N_TYPES = BLOCK_DEFS.length;
+const BLK_SOLID  = new Uint8Array(N_TYPES);
+const BLK_LANDM  = new Float32Array(N_TYPES);
+const BLK_BASEW  = new Float32Array(N_TYPES);
+for (let i = 0; i < N_TYPES; i++) {
+  BLK_SOLID[i] = BLOCK_DEFS[i].solid ? 1 : 0;
+  BLK_LANDM[i] = BLOCK_DEFS[i].landMult;
+  BLK_BASEW[i] = CFG.BLOCK_WEIGHTS[i] ?? 1;
+}
+
+function surfaceBlock(x, z, top) {
+  const biome = biomeAt(x, z);
+  if (top <= CFG.WATER_LVL + 1) return 4;
+  if (biome < 0.28) return 4;
+  if (biome > 0.78) return top > 22 ? 9 : 3;
+  return 0;
+}
+function blockTypeAt(x, y, z, top) {
+  if (y > top) return -1;
+  if (y < top - 3 && y > CFG.WATER_LVL + 1 && isCave(x, y, z)) return -1;
+  if (y <= CFG.WATER_LVL && top <= CFG.WATER_LVL + 2) return 1; // water only in ocean columns
+  if (y === top) return surfaceBlock(x, z, top);
+  if (y >= top - 2) return 2;
+  if (y >= top - 7) return 3;
+  const h = Math.abs(Math.sin(x*13.7 + y*29.3 + z*7.1));
+  return (h < 0.07) ? 7 : 3;
+}
+
+// ─── Scene / camera / renderer ────────────────────────────────────────
+const scene    = new THREE.Scene();
+const camera   = new THREE.PerspectiveCamera(75, innerWidth/innerHeight, 0.1, 2000);
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+scene.fog = new THREE.FogExp2(0x87ceeb, 0.007);
+scene.background = new THREE.Color(0x87ceeb);
+
+const sunLight = new THREE.DirectionalLight(0xfff5cc, 1.5);
+sunLight.target = new THREE.Object3D();
+scene.add(sunLight, sunLight.target);
+const ambient  = new THREE.AmbientLight(0x2233aa, 0.4);
+scene.add(ambient);
+const sunMesh  = new THREE.Mesh(new THREE.SphereGeometry(5,16,16), new THREE.MeshBasicMaterial({color:0xffffaa}));
+const moonMesh = new THREE.Mesh(new THREE.SphereGeometry(3,16,16), new THREE.MeshBasicMaterial({color:0xddeeff}));
+scene.add(sunMesh, moonMesh);
+const WC = new THREE.Vector3(WS/2, 0, WS/2);
+
+// ─── Wind particle system ─────────────────────────────────────────────
+// 2000 particles in flat typed arrays — zero per-frame GC.
+const WPART = 2000;
+const wpPX  = new Float32Array(WPART), wpPY  = new Float32Array(WPART), wpPZ  = new Float32Array(WPART);
+const wpVX  = new Float32Array(WPART), wpVY  = new Float32Array(WPART), wpVZ  = new Float32Array(WPART);
+const wpLife= new Float32Array(WPART), wpMaxL= new Float32Array(WPART);
+const wpType= new Uint8Array(WPART);  // 0=dust 1=leaf 2=snow 3=embers(tornado)
+const wpBufPos = new Float32Array(WPART * 3);
+const wpBufCol = new Float32Array(WPART * 3); // rgb
+const wpBufAlpha = new Float32Array(WPART);   // per-particle alpha
+
+const wpGeo = new THREE.BufferGeometry();
+wpGeo.setAttribute('position', new THREE.BufferAttribute(wpBufPos,   3));
+wpGeo.setAttribute('color',    new THREE.BufferAttribute(wpBufCol,   3));
+wpGeo.setAttribute('aAlpha',   new THREE.BufferAttribute(wpBufAlpha, 1));
+
+// Shader-based particles: round soft circles, per-vertex alpha, visible against sky.
+const wpMat = new THREE.ShaderMaterial({
+  uniforms: { uSize: { value: 90.0 } }, // screen-space pixel size * distance
+  vertexShader: `
+    attribute float aAlpha;
+    uniform float uSize;
+    varying vec3 vCol;
+    varying float vAlpha;
+    void main() {
+      vCol   = color;
+      vAlpha = aAlpha;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      gl_PointSize = uSize / -mv.z;
+      gl_Position  = projectionMatrix * mv;
+    }`,
+  fragmentShader: `
+    varying vec3  vCol;
+    varying float vAlpha;
+    void main() {
+      vec2  uv = gl_PointCoord - 0.5;
+      float r  = dot(uv, uv);
+      if (r > 0.25) discard;
+      float edge = 1.0 - smoothstep(0.12, 0.25, r);
+      gl_FragColor = vec4(vCol, vAlpha * edge);
+    }`,
+  transparent: true,
+  depthWrite:  false,
+  vertexColors: true,
+});
+const wpPoints = new THREE.Points(wpGeo, wpMat);
+wpPoints.frustumCulled = false;
+scene.add(wpPoints);
+
+function _wpSpawn(i, px, py, pz, wdx, wdz, totalWind, gustNow, shelter) {
+  // Spawn close to player so they're visible (4–12 blocks)
+  const angle = Math.random() * Math.PI * 2;
+  const dist  = 4 + Math.random() * 8;
+  wpPX[i] = px + Math.cos(angle) * dist;
+  wpPY[i] = py - 1.5 + Math.random() * 4;
+  wpPZ[i] = pz + Math.sin(angle) * dist;
+  const spd = Math.max(0.5, totalWind) * (0.5 + Math.random() * 0.9);
+  wpVX[i] = wdx * spd + (Math.random()-0.5) * 1.4;
+  wpVY[i] = (Math.random()-0.5) * 0.9 + gustNow * 0.06;
+  wpVZ[i] = wdz * spd + (Math.random()-0.5) * 1.4;
+  wpLife[i] = 1.2 + Math.random() * 3.0;
+  wpMaxL[i] = wpLife[i];
+  // All particles are grayish-white dust/mist; tornado overrides to embers in the physics loop
+  wpType[i] = 0;
+}
+
+// Kill all on init; animate loop will spawn them.
+for (let i = 0; i < WPART; i++) { wpLife[i] = 0; wpMaxL[i] = 1; wpBufPos[i*3+1] = -9999; wpBufAlpha[i] = 0; }
+
+function updateWindParticles(dt, totalWind, gustNow, wdx, wdz, nearestTornadoDist, shelter) {
+  const px = pBody.position.x, py = pBody.position.y, pz = pBody.position.z;
+  // Only spawn at high wind (>= 6); scale up from there
+  const density = totalWind < 6 ? 0 : clamp((totalWind - 6) / 6, 0, 1.0);
+  const activeTarget = Math.round(WPART * density);
+
+  // Particle screen-space size scales with wind/gusts
+  wpMat.uniforms.uSize.value = 90 + clamp(totalWind * 8, 0, 80) + clamp(gustNow * 4, 0, 60)
+    + (nearestTornadoDist < 60 ? clamp(1 - nearestTornadoDist/60, 0, 1) * 50 : 0);
+
+  for (let i = 0; i < WPART; i++) {
+    wpLife[i] -= dt;
+
+    if (wpLife[i] <= 0) {
+      if (i < activeTarget) {
+        _wpSpawn(i, px, py, pz, wdx, wdz, totalWind, gustNow, shelter);
+      } else {
+        // park off-screen
+        wpBufPos[i*3+1] = -9999;
+        wpBufAlpha[i] = 0;
+        continue;
+      }
+    }
+
+    // ── Tornado vortex pull ──
+    let tvx = 0, tvz = 0, tvy = 0;
+    if (nearestTornadoDist < 55) {
+      for (let t = 0; t < activeTornadoes.length; t++) {
+        const to = activeTornadoes[t];
+        const tdx = to.x - wpPX[i], tdz = to.z - wpPZ[i];
+        const td2 = tdx*tdx + tdz*tdz;
+        if (td2 < 50*50) {
+          const td = Math.sqrt(td2);
+          const inten = clamp(1 - td/50, 0, 1);
+          const tang = Math.atan2(tdz, tdx) + Math.PI * 0.5;
+          const sprl = to.strength * 0.22 * inten;
+          tvx += Math.cos(tang) * sprl + (tdx/(td||1)) * to.strength * 0.06 * inten;
+          tvy += to.strength * 0.18 * inten;
+          tvz += Math.sin(tang) * sprl + (tdz/(td||1)) * to.strength * 0.06 * inten;
+          // Tornado changes type to embers/dark debris
+          if (inten > 0.5) wpType[i] = 3;
+        }
+      }
+    }
+
+    // ── Physics (drag, wind acceleration, gravity) ──
+    const drag = Math.pow(0.86, dt * 60);
+    wpVX[i] = (wpVX[i] + (wdx * totalWind * 0.10 + tvx) * dt) * drag;
+    wpVY[i] = (wpVY[i] + (-0.65 + tvy) * dt) * drag;
+    wpVZ[i] = (wpVZ[i] + (wdz * totalWind * 0.10 + tvz) * dt) * drag;
+
+    // Turbulence swirl (perpendicular to wind dir)
+    const turb = Math.sin(totalTime * 3.3 + i * 0.37) * clamp(totalWind * 0.06, 0.1, 0.9);
+    wpVX[i] += wdz * turb * dt;
+    wpVZ[i] -= wdx * turb * dt;
+
+    wpPX[i] += wpVX[i] * dt;
+    wpPY[i] += wpVY[i] * dt;
+    wpPZ[i] += wpVZ[i] * dt;
+
+    // Kill if too far
+    const fdx = wpPX[i]-px, fdy = wpPY[i]-py, fdz = wpPZ[i]-pz;
+    if (fdx*fdx + fdy*fdy + fdz*fdz > 16*16) wpLife[i] = 0;
+
+    // ── Write position ──
+    wpBufPos[i*3]   = wpPX[i];
+    wpBufPos[i*3+1] = wpPY[i];
+    wpBufPos[i*3+2] = wpPZ[i];
+
+    // ── Color + alpha ──
+    const age      = wpMaxL[i] - wpLife[i];
+    const lifeRatio = wpLife[i] / wpMaxL[i];
+    const fadeIn   = clamp(age / 0.35, 0, 1);
+    const fadeOut  = clamp(lifeRatio / 0.18, 0, 1);
+    const alpha    = fadeIn * fadeOut * 0.90;
+
+    // Grayish-white dust always; tornado changes to dark debris/embers
+    let r, g, b;
+    if (wpType[i] === 3) {
+      // Near tornado: dark grey debris
+      r=0.35; g=0.33; b=0.32;
+    } else {
+      // Normal: light gray-white (looks like dust/mist)
+      r=0.82; g=0.82; b=0.85;
+    }
+
+    wpBufCol[i*3]   = r;
+    wpBufCol[i*3+1] = g;
+    wpBufCol[i*3+2] = b;
+    wpBufAlpha[i]   = alpha;
+  }
+  wpGeo.attributes.position.needsUpdate = true;
+  wpGeo.attributes.color.needsUpdate    = true;
+  wpGeo.attributes.aAlpha.needsUpdate   = true;
+}
+
+// ─── RNG and tree layout ──────────────────────────────────────────────
+function mulberry32(seed) {
+  return () => {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const rng = mulberry32(12345);
+const TREES = [];
+for (let i = 0; i < 300; i++) {
+  const tx = Math.floor(rng() * WS), tz = Math.floor(rng() * WS);
+  const th = groundH(tx, tz), bm = biomeAt(tx, tz);
+  if (th > CFG.WATER_LVL + 1 && bm >= 0.28 && bm < 0.72) {
+    TREES.push({ x: tx, z: tz, base: th, height: 3 + Math.floor(rng() * 4) });
+  }
+}
+
+// ─── Mesh capacity (skip exact pre-count — use volume estimate) ───────
+const VOLUME = WS * WS * 60;
+// Rough proportions (re-tuned); each gets a healthy reserve.
+const RESERVE = 2200;
+const CAP = [
+  WS*WS + 1500,             // grass
+  Math.floor(VOLUME * 0.10),// water
+  WS*WS * 3 + 1500,         // dirt
+  Math.floor(VOLUME * 0.55),// stone
+  Math.floor(VOLUME * 0.05),// sand
+  TREES.length * 10,        // wood
+  TREES.length * 24,        // leaves
+  Math.floor(VOLUME * 0.04),// coal
+  TREES.length * 12,        // root
+  WS * WS,                  // snow
+  WS * WS                   // ice
+];
+for (let i = 0; i < CAP.length; i++) CAP[i] = Math.max(64, CAP[i] + RESERVE);
+
+// ─── Build instanced meshes; tag with type index for cheap raycast lookup
+const geo = new THREE.BoxGeometry(1, 1, 1);
+const meshes = []; // { mesh, count, posX, posY, posZ }
+for (let t = 0; t < N_TYPES; t++) {
+  const def = BLOCK_DEFS[t];
+  const mat = new THREE.MeshLambertMaterial({
+    color: def.color, transparent: def.transparent || false, opacity: def.opacity || 1,
+  });
+  const mesh = new THREE.InstancedMesh(geo, mat, CAP[t]);
+  mesh.count = 0;
+  mesh.frustumCulled = false; // bounding sphere meaningless for whole-world instances
+  mesh.userData.t = t;
+  scene.add(mesh);
+  meshes.push({
+    mesh,
+    posX: new Int16Array(CAP[t]),
+    posY: new Int16Array(CAP[t]),
+    posZ: new Int16Array(CAP[t]),
+  });
+}
+
+// ─── Block registry: int key → { type, idx } via two parallel Uint16/Int8 arrays
+// Map<int, {type,idx}> would still allocate; pack into typed arrays of size = total instances.
+// Instead: Map<int, packed32> where packed = (type << 24) | idx. Lookups are pure-int math.
+const reg = new Map();
+const packEntry = (type, idx) => (type << 24) | idx;
+const unpackType = e => (e >>> 24) & 0xff;
+const unpackIdx  = e => e & 0xFFFFFF;
+
+// Heightmap for O(1) "top filled Y" used by tornado/wind systems.
+const topY = new Int16Array(WS * WS).fill(-1);
+const topIdx = (x, z) => z * WS + x;
+
+const _m4 = new THREE.Matrix4();
+function setMatTranslation(mesh, idx, x, y, z) {
+  // Identity rotation, unit scale → only translation columns matter.
+  _m4.makeTranslation(x, y, z);
+  mesh.setMatrixAt(idx, _m4);
+}
+
+function addBlock(x, y, z, type) {
+  const k = ikey(x, y, z);
+  if (reg.has(k)) return -1;
+  const slot = meshes[type];
+  const m = slot.mesh;
+  if (m.count >= slot.posX.length) return -1;
+  const idx = m.count;
+  setMatTranslation(m, idx, x, y, z);
+  slot.posX[idx] = x; slot.posY[idx] = y; slot.posZ[idx] = z;
+  reg.set(k, packEntry(type, idx));
+  m.count++;
+  // Maintain heightmap
+  if (x >= 0 && x < WS && z >= 0 && z < WS) {
+    const ti = topIdx(x, z);
+    if (y > topY[ti]) topY[ti] = y;
+  }
+  return idx;
+}
+
+function removeFromMesh(type, idx) {
+  // Returns the (x,y,z) of the removed slot.
+  const slot = meshes[type];
+  const m = slot.mesh;
+  const rx = slot.posX[idx], ry = slot.posY[idx], rz = slot.posZ[idx];
+  reg.delete(ikey(rx, ry, rz));
+  const last = m.count - 1;
+  if (idx < last) {
+    const lx = slot.posX[last], ly = slot.posY[last], lz = slot.posZ[last];
+    setMatTranslation(m, idx, lx, ly, lz);
+    slot.posX[idx] = lx; slot.posY[idx] = ly; slot.posZ[idx] = lz;
+    reg.set(ikey(lx, ly, lz), packEntry(type, idx));
+  }
+  m.count--;
+  m.instanceMatrix.needsUpdate = true;
+  return { x: rx, y: ry, z: rz };
+}
+
+function placeBlock(x, y, z, type) {
+  const k = ikey(x, y, z);
+  if (reg.has(k)) return false;
+  const slot = meshes[type];
+  const m = slot.mesh;
+  if (m.count >= slot.posX.length) return false;
+  const idx = m.count;
+  setMatTranslation(m, idx, x, y, z);
+  slot.posX[idx] = x; slot.posY[idx] = y; slot.posZ[idx] = z;
+  reg.set(k, packEntry(type, idx));
+  m.count++;
+  m.instanceMatrix.needsUpdate = true;
+  if (x >= 0 && x < WS && z >= 0 && z < WS) {
+    const ti = topIdx(x, z);
+    if (y > topY[ti]) topY[ti] = y;
+  }
+  return true;
+}
+
+function recomputeColumnTop(x, z) {
+  // Called after a top block is removed. Walk down until we find one in reg.
+  if (x < 0 || x >= WS || z < 0 || z >= WS) return;
+  const ti = topIdx(x, z);
+  let y = topY[ti];
+  while (y >= 0 && !reg.has(ikey(x, y, z))) y--;
+  topY[ti] = y;
+}
+
+// ─── Generate terrain (single pass, no pre-count) ─────────────────────
+for (let x = 0; x < WS; x++) {
+  for (let z = 0; z < WS; z++) {
+    const top = groundH(x, z);
+    for (let y = 0; y <= top; y++) {
+      const t = blockTypeAt(x, y, z, top);
+      if (t >= 0) addBlock(x, y, z, t);
+    }
+  }
+}
+
+// ─── Generate trees (positions stored as plain {x,y,z} triples) ───────
+const TREE_PARTS = [];
+const treeByPos = new Map(); // int key → tree
+const dirtyTrees = new Set();
+const treeRefreshAt = new Map(); // tree → next allowed time
+
+function markPosTreeDirty(k) { const t = treeByPos.get(k); if (t) dirtyTrees.add(t); }
+
+for (const { x, z, base, height } of TREES) {
+  const trunk = [], leaves = [], roots = [];
+  for (let i = 1; i <= height; i++) {
+    const y = base + i;
+    if (addBlock(x, y, z, 5) >= 0) trunk.push({ x, y, z });
+  }
+  const rootY = base + 1;
+  for (const [rx, rz] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+    const nx = x+rx, nz = z+rz;
+    if (addBlock(nx, rootY, nz, 8) >= 0) roots.push({ x:nx, y:rootY, z:nz });
+  }
+  const ly = base + height + 1;
+  for (let lx = -1; lx <= 1; lx++) {
+    for (let lz = -1; lz <= 1; lz++) {
+      const p1 = { x:x+lx, y:ly, z:z+lz };
+      const p2 = { x:x+lx, y:ly+1, z:z+lz };
+      if (addBlock(p1.x,p1.y,p1.z, 6) >= 0) leaves.push(p1);
+      if (addBlock(p2.x,p2.y,p2.z, 6) >= 0) leaves.push(p2);
+    }
+  }
+  const tree = { x, z, base, height, trunk, roots, leaves, growTimer: 4 + Math.random()*5 };
+  TREE_PARTS.push(tree);
+  for (const p of trunk)  treeByPos.set(ikey(p.x,p.y,p.z), tree);
+  for (const p of roots)  treeByPos.set(ikey(p.x,p.y,p.z), tree);
+  for (const p of leaves) treeByPos.set(ikey(p.x,p.y,p.z), tree);
+}
+for (const slot of meshes) slot.mesh.instanceMatrix.needsUpdate = true;
+
+// ─── Break / place public API used by gameplay ────────────────────────
+function breakBlockAtPos(x, y, z) {
+  const k = ikey(x, y, z);
+  const e = reg.get(k);
+  if (e === undefined) return -1;
+  const type = unpackType(e), idx = unpackIdx(e);
+  removeFromMesh(type, idx);
+  // heightmap bookkeeping
+  if (x >= 0 && x < WS && z >= 0 && z < WS) {
+    const ti = topIdx(x, z);
+    if (topY[ti] === y) recomputeColumnTop(x, z);
+  }
+  // tree dirtying
+  const tree = treeByPos.get(k);
+  if (tree) { treeByPos.delete(k); dirtyTrees.add(tree); }
+  return type;
+}
+
+function spawnFallingBlock(type, x, y, z) {
+  const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({
+    color: BLOCK_DEFS[type].color,
+    transparent: BLOCK_DEFS[type].transparent || false,
+    opacity: BLOCK_DEFS[type].opacity || 1,
+  }));
+  mesh.position.set(x, y, z);
+  scene.add(mesh);
+  fallingBlocks.push({
+    type, mesh,
+    px: x, py: y + 0.02, pz: z,
+    vx: (Math.random()-0.5)*1.4, vy: Math.random()*0.6, vz: (Math.random()-0.5)*1.4,
+    spinX: (Math.random()-0.5)*2.2, spinY: (Math.random()-0.5)*2.2, spinZ: (Math.random()-0.5)*2.2,
+  });
+}
+function spawnWindBlock(type, x, y, z, vx, vy, vz) {
+  const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({
+    color: BLOCK_DEFS[type].color,
+    transparent: BLOCK_DEFS[type].transparent || false,
+    opacity: BLOCK_DEFS[type].opacity || 1,
+  }));
+  mesh.position.set(x, y, z);
+  scene.add(mesh);
+  fallingBlocks.push({
+    type, mesh, px: x, py: y, pz: z, vx, vy, vz,
+    spinX: (Math.random()-0.5)*6, spinY: (Math.random()-0.5)*6, spinZ: (Math.random()-0.5)*6,
+  });
+}
+
+function blockWeight(type, x, y, z) {
+  if (type === 1) return 0;
+  // hash3 jitter (inline)
+  let h = (Math.imul(x|0, 374761393) ^ Math.imul(y|0, 668265263) ^ Math.imul(z|0, 2147483647)) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177); h ^= h >>> 16;
+  const jitter = ((h >>> 0) / 4294967295 - 0.5) * 0.30;
+  return Math.max(0.05, BLK_BASEW[type] * (1 + jitter));
+}
+
+// ─── Tree refresh — event driven, throttled per tree ──────────────────
+function collapseTree(tree) {
+  for (const p of tree.trunk)  { const e = reg.get(ikey(p.x,p.y,p.z)); if (e !== undefined) { breakBlockAtPos(p.x,p.y,p.z); spawnFallingBlock(unpackType(e), p.x, p.y, p.z); } }
+  for (const p of tree.roots)  { const e = reg.get(ikey(p.x,p.y,p.z)); if (e !== undefined) { breakBlockAtPos(p.x,p.y,p.z); spawnFallingBlock(unpackType(e), p.x, p.y, p.z); } }
+  for (const p of tree.leaves) { const e = reg.get(ikey(p.x,p.y,p.z)); if (e !== undefined) { breakBlockAtPos(p.x,p.y,p.z); spawnFallingBlock(unpackType(e), p.x, p.y, p.z); } }
+  tree.trunk.length = 0; tree.roots.length = 0; tree.leaves.length = 0;
+}
+const _bfsAlive = new Set();
+const _bfsSupp  = new Set();
+const _bfsQ = [];
+function refreshTree(tree) {
+  // Filter out broken parts in-place
+  let w = 0;
+  for (let i = 0; i < tree.trunk.length;  i++) { const p = tree.trunk[i];  if (reg.has(ikey(p.x,p.y,p.z))) tree.trunk[w++]  = p; } tree.trunk.length  = w;
+  w = 0;
+  for (let i = 0; i < tree.roots.length;  i++) { const p = tree.roots[i];  if (reg.has(ikey(p.x,p.y,p.z))) tree.roots[w++]  = p; } tree.roots.length  = w;
+  w = 0;
+  for (let i = 0; i < tree.leaves.length; i++) { const p = tree.leaves[i]; if (reg.has(ikey(p.x,p.y,p.z))) tree.leaves[w++] = p; } tree.leaves.length = w;
+  if (!tree.roots.length) { collapseTree(tree); return; }
+
+  _bfsAlive.clear(); _bfsSupp.clear(); _bfsQ.length = 0;
+  for (let i = 0; i < tree.trunk.length;  i++) { const p = tree.trunk[i];  _bfsAlive.add(ikey(p.x,p.y,p.z)); }
+  for (let i = 0; i < tree.roots.length;  i++) { const p = tree.roots[i];  _bfsAlive.add(ikey(p.x,p.y,p.z)); }
+  for (let i = 0; i < tree.leaves.length; i++) { const p = tree.leaves[i]; _bfsAlive.add(ikey(p.x,p.y,p.z)); }
+  for (let i = 0; i < tree.roots.length;  i++) {
+    const p = tree.roots[i], k = ikey(p.x,p.y,p.z);
+    if (!_bfsSupp.has(k)) { _bfsSupp.add(k); _bfsQ.push(k); }
+  }
+  while (_bfsQ.length) {
+    const k = _bfsQ.shift();
+    for (let n = 0; n < 6; n++) {
+      const nk = k + NB[n];
+      if (_bfsAlive.has(nk) && !_bfsSupp.has(nk)) { _bfsSupp.add(nk); _bfsQ.push(nk); }
+    }
+  }
+  const purge = (arr) => {
+    let w2 = 0;
+    for (let i = 0; i < arr.length; i++) {
+      const p = arr[i], k = ikey(p.x,p.y,p.z);
+      if (_bfsSupp.has(k)) arr[w2++] = p;
+      else { const e = reg.get(k); if (e !== undefined) { breakBlockAtPos(p.x,p.y,p.z); spawnFallingBlock(unpackType(e), p.x, p.y, p.z); } }
+    }
+    arr.length = w2;
+  };
+  purge(tree.trunk); purge(tree.roots); purge(tree.leaves);
+  if (!tree.roots.length || !tree.trunk.length) collapseTree(tree);
+}
+
+function tryGrowTreeRoots(tree, dt) {
+  if (!tree.roots.length && !tree.trunk.length) return;
+  tree.growTimer -= dt;
+  if (tree.growTimer > 0) return;
+  tree.growTimer = 5 + Math.random() * 9;
+  const sources = [...tree.roots, ...tree.trunk.slice(0, 2)];
+  if (!sources.length) return;
+  const src = sources[Math.floor(Math.random() * sources.length)];
+  const cands = [[1,0,0],[-1,0,0],[0,0,1],[0,0,-1],[1,-1,0],[-1,-1,0],[0,-1,1],[0,-1,-1],[1,-1,1],[-1,-1,-1],[1,-1,-1],[-1,-1,1]];
+  const start = Math.floor(Math.random() * cands.length);
+  for (let i = 0; i < cands.length; i++) {
+    const c = cands[(i + start) % cands.length];
+    const px = src.x + c[0], py = src.y + c[1], pz = src.z + c[2];
+    if (px < 0 || pz < 0 || px >= WS || pz >= WS) continue;
+    const k = ikey(px, py, pz);
+    const e = reg.get(k);
+    if (e !== undefined) {
+      const t = unpackType(e);
+      if (t === 0 || t === 2 || t === 4 || t === 9) {
+        breakBlockAtPos(px, py, pz);
+        if (treeByPos.has(k)) treeByPos.delete(k);
+        addBlock(px, py, pz, 8);
+        const np = { x:px, y:py, z:pz };
+        tree.roots.push(np); treeByPos.set(k, tree); return;
+      }
+      continue;
+    }
+    if (Math.abs(py - tree.base) > 3) continue;
+    addBlock(px, py, pz, 8);
+    const np = { x:px, y:py, z:pz };
+    tree.roots.push(np); treeByPos.set(k, tree); return;
+  }
+}
+
+// ─── Tree motion (no per-frame allocations) ───────────────────────────
+function updateTreeMotion(dt, windOut, windDirX, windDirZ, swayTime, totalTime) {
+  const treeMesh = meshes[5].mesh, leafMesh = meshes[6].mesh, rootMesh = meshes[8].mesh;
+  let treeDirty = false, leafDirty = false, rootDirty = false;
+
+  for (let ti = 0; ti < TREE_PARTS.length; ti++) {
+    const tree = TREE_PARTS[ti];
+    if (!tree.trunk.length && !tree.roots.length && !tree.leaves.length) continue;
+
+    tryGrowTreeRoots(tree, dt);
+
+    // Refresh only if dirty AND throttle allows.
+    if (dirtyTrees.has(tree)) {
+      const next = treeRefreshAt.get(tree) || 0;
+      if (totalTime >= next) {
+        refreshTree(tree);
+        dirtyTrees.delete(tree);
+        treeRefreshAt.set(tree, totalTime + CFG.TREE_REFRESH_THROTTLE);
+      }
+    }
+
+    const support = Math.max(1, tree.roots.length * CFG.ROOT_MULT + 1);
+    const effW = windOut / support;
+    const tWave = Math.sin(swayTime + tree.x*0.11 + tree.z*0.13) * 0.5 / support;
+
+    const trunk = tree.trunk;
+    for (let i = 0; i < trunk.length; i++) {
+      const p = trunk[i];
+      const e = reg.get(ikey(p.x,p.y,p.z)); if (e === undefined) continue;
+      const idx = unpackIdx(e);
+      const t = trunk.length <= 1 ? 1 : i / (trunk.length - 1);
+      const w = blockWeight(5, p.x, p.y, p.z);
+      const bend = (effW / w) * (CFG.TRUNK_BEND_START + t * (CFG.TRUNK_BEND_END - CFG.TRUNK_BEND_START));
+      const wob  = tWave * (effW / w) * (0.3 + t * 0.7);
+      const off  = bend + wob;
+      setMatTranslation(treeMesh, idx, p.x + windDirX * off, p.y, p.z + windDirZ * off);
+      treeDirty = true;
+    }
+    const roots = tree.roots;
+    for (let i = 0; i < roots.length; i++) {
+      const p = roots[i];
+      const e = reg.get(ikey(p.x,p.y,p.z)); if (e === undefined) continue;
+      const idx = unpackIdx(e);
+      const t = i / Math.max(1, roots.length - 1);
+      const w = blockWeight(8, p.x, p.y, p.z);
+      const bend = (effW / w) * (CFG.ROOT_BEND_START + t * (CFG.ROOT_BEND_END - CFG.ROOT_BEND_START));
+      setMatTranslation(rootMesh, idx, p.x + windDirX * bend, p.y, p.z + windDirZ * bend);
+      rootDirty = true;
+    }
+    const leaves = tree.leaves;
+    for (let i = 0; i < leaves.length; i++) {
+      const p = leaves[i];
+      const e = reg.get(ikey(p.x,p.y,p.z)); if (e === undefined) continue;
+      const idx = unpackIdx(e);
+      const t = i / Math.max(1, leaves.length - 1);
+      const w = blockWeight(6, p.x, p.y, p.z);
+      const bend = (effW / w) * (CFG.LEAF_BEND_START + t * (CFG.LEAF_BEND_END - CFG.LEAF_BEND_START));
+      const wob  = Math.sin(swayTime*CFG.LEAF_WOBBLE_RATE + p.x*0.17 + p.z*0.17 + i*CFG.LEAF_WOBBLE_STEP) * (effW / w) * CFG.LEAF_WOBBLE_MULT;
+      const off  = bend + wob;
+      setMatTranslation(leafMesh, idx, p.x + windDirX * off, p.y, p.z + windDirZ * off);
+      leafDirty = true;
+    }
+  }
+  if (treeDirty) treeMesh.instanceMatrix.needsUpdate = true;
+  if (leafDirty) leafMesh.instanceMatrix.needsUpdate = true;
+  if (rootDirty) rootMesh.instanceMatrix.needsUpdate = true;
+}
+
+// ─── Outline highlight ────────────────────────────────────────────────
+const outline = new THREE.LineSegments(
+  new THREE.EdgesGeometry(new THREE.BoxGeometry(1.02,1.02,1.02)),
+  new THREE.LineBasicMaterial({ color: 0x000000 })
+);
+outline.visible = false; scene.add(outline);
+
+// ─── Controls ─────────────────────────────────────────────────────────
+const controls = new PointerLockControls(camera, document.body);
+const pBody    = controls.getObject();
+scene.add(pBody);
+const overlay  = document.getElementById("overlay");
+document.addEventListener("click", e => {
+  if (e.target && e.target.id === "audioBtn") return;
+  controls.lock();
+});
+controls.addEventListener("lock",   () => { overlay.style.display = "none"; initAudio(); });
+controls.addEventListener("unlock", () => { overlay.style.display = "flex"; });
+
+// ─── Inventory / hotbar ───────────────────────────────────────────────
+let hand = [null, null], selectedSlot = 0;
+const hotbarEl = document.getElementById("hotbar");
+function buildHotbar() {
+  hotbarEl.innerHTML = '';
+  for (let i = 0; i < hand.length; i++) {
+    const blockType = hand[i];
+    const isEmpty = blockType === null;
+    const def = isEmpty ? null : BLOCK_DEFS[blockType];
+    const hex = isEmpty ? '#000' : '#'+def.color.toString(16).padStart(6,'0');
+    const label = isEmpty ? 'Empty' : def.name;
+    const slot = document.createElement('div');
+    slot.className = 'slot' + (i===selectedSlot?' active':'') + (isEmpty?' empty':'');
+    slot.innerHTML = `<span class="slot-num">[${i+1}]</span><div class="slot-swatch" style="background:${hex}"></div><span>${label}</span>`;
+    hotbarEl.appendChild(slot);
+  }
+}
+buildHotbar();
+function pickUp(blockType) {
+  if (blockType === 1) return; // water not pickable
+  for (let i = 0; i < hand.length; i++) { if (hand[i] === null) { hand[i] = blockType; buildHotbar(); return; } }
+  // Hotbar full — don't pick up
+  showNotif('Inventory full!');
+}
+
+// ─── Audio engine (unchanged in shape, kept compact) ──────────────────
+let audioCtx = null, audioEnabled = false;
+let windGain=null, windFilter=null, windHowlGain=null, windHowlOsc=null;
+let tornadoGain=null, tornadoGain2=null;
+let stepTimer = 0;
+function initAudio() {
+  if (audioCtx) return;
+  try {
+    audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+    const len = audioCtx.sampleRate * 3;
+    const buf = audioCtx.createBuffer(1, len, audioCtx.sampleRate);
+    const d = buf.getChannelData(0); for (let i = 0; i < len; i++) d[i] = Math.random()*2-1;
+    const nSrc = audioCtx.createBufferSource(); nSrc.buffer = buf; nSrc.loop = true;
+    windFilter = audioCtx.createBiquadFilter(); windFilter.type='bandpass'; windFilter.frequency.value=500; windFilter.Q.value=1.5;
+    windGain = audioCtx.createGain(); windGain.gain.value = 0;
+    nSrc.connect(windFilter); windFilter.connect(windGain); windGain.connect(audioCtx.destination); nSrc.start();
+    windHowlOsc = audioCtx.createOscillator(); windHowlOsc.type='sine'; windHowlOsc.frequency.value=220;
+    windHowlGain = audioCtx.createGain(); windHowlGain.gain.value = 0;
+    windHowlOsc.connect(windHowlGain); windHowlGain.connect(audioCtx.destination); windHowlOsc.start();
+    const tOsc = audioCtx.createOscillator(); tOsc.type='sawtooth'; tOsc.frequency.value=38;
+    const tLFO = audioCtx.createOscillator(); tLFO.type='sine'; tLFO.frequency.value=0.7;
+    const tLG  = audioCtx.createGain(); tLG.gain.value=18;
+    tLFO.connect(tLG); tLG.connect(tOsc.frequency);
+    const tFilt = audioCtx.createBiquadFilter(); tFilt.type='lowpass'; tFilt.frequency.value=180;
+    tornadoGain = audioCtx.createGain(); tornadoGain.gain.value = 0;
+    tOsc.connect(tFilt); tFilt.connect(tornadoGain); tornadoGain.connect(audioCtx.destination);
+    tOsc.start(); tLFO.start();
+    const tBuf = audioCtx.createBuffer(1, audioCtx.sampleRate*2, audioCtx.sampleRate);
+    const td = tBuf.getChannelData(0); for (let i = 0; i < td.length; i++) td[i] = Math.random()*2-1;
+    const tSrc = audioCtx.createBufferSource(); tSrc.buffer = tBuf; tSrc.loop = true;
+    const tFilt2 = audioCtx.createBiquadFilter(); tFilt2.type='bandpass'; tFilt2.frequency.value=900; tFilt2.Q.value=1.8;
+    tornadoGain2 = audioCtx.createGain(); tornadoGain2.gain.value = 0;
+    tSrc.connect(tFilt2); tFilt2.connect(tornadoGain2); tornadoGain2.connect(audioCtx.destination); tSrc.start();
+    audioEnabled = true;
+    document.getElementById("audioBtn").textContent = "🔊 Sound ON";
+  } catch (e) { console.warn("Audio init failed", e); }
+}
+function updateAudio(localWind, localGust, nearestTornadoDist) {
+  if (!audioCtx || !audioEnabled) return;
+  const t = audioCtx.currentTime;
+  windGain.gain.setTargetAtTime(clamp(localWind*0.014,0,0.38), t, 0.4);
+  windHowlGain.gain.setTargetAtTime(clamp((localWind-6)*0.025,0,0.28), t, 0.4);
+  windHowlOsc.frequency.setTargetAtTime(160 + localWind*9 + localGust*3, t, 0.6);
+  windFilter.frequency.setTargetAtTime(250 + localWind*55, t, 0.4);
+  const tVol = nearestTornadoDist < 60 ? clamp((60-nearestTornadoDist)/60*0.55, 0, 0.55) : 0;
+  tornadoGain.gain.setTargetAtTime(tVol*0.65, t, 0.6);
+  tornadoGain2.gain.setTargetAtTime(tVol*0.35, t, 0.6);
+}
+function playFootstep(blockType) {
+  if (!audioCtx || !audioEnabled) return;
+  const osc = audioCtx.createOscillator(), gain = audioCtx.createGain();
+  const freqs = [190,0,155,95,210,135,260,80,175,220,320];
+  osc.type='sine'; osc.frequency.value = freqs[blockType] || 150;
+  const now = audioCtx.currentTime;
+  gain.gain.setValueAtTime(0.09, now); gain.gain.exponentialRampToValueAtTime(0.001, now+0.11);
+  osc.connect(gain); gain.connect(audioCtx.destination); osc.start(now); osc.stop(now+0.13);
+}
+function playBlockBreak(type) {
+  if (!audioCtx || !audioEnabled) return;
+  const buf = audioCtx.createBuffer(1, (audioCtx.sampleRate*0.09)|0, audioCtx.sampleRate);
+  const d = buf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random()*2-1;
+  const src = audioCtx.createBufferSource(); src.buffer = buf;
+  const filt = audioCtx.createBiquadFilter(); filt.type='highpass'; filt.frequency.value = 200 + type*80;
+  const gain = audioCtx.createGain(); const now = audioCtx.currentTime;
+  gain.gain.setValueAtTime(0.28, now); gain.gain.exponentialRampToValueAtTime(0.001, now+0.07);
+  src.connect(filt); filt.connect(gain); gain.connect(audioCtx.destination); src.start();
+}
+function playBlockPlace() {
+  if (!audioCtx || !audioEnabled) return;
+  const osc = audioCtx.createOscillator(), gain = audioCtx.createGain();
+  osc.type='sine'; osc.frequency.value = 180;
+  const now = audioCtx.currentTime;
+  gain.gain.setValueAtTime(0.18, now); gain.gain.exponentialRampToValueAtTime(0.001, now+0.09);
+  osc.connect(gain); gain.connect(audioCtx.destination); osc.start(now); osc.stop(now+0.11);
+}
+function playSplash() {
+  if (!audioCtx || !audioEnabled) return;
+  const buf = audioCtx.createBuffer(1, (audioCtx.sampleRate*0.28)|0, audioCtx.sampleRate);
+  const d = buf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random()*2-1;
+  const src = audioCtx.createBufferSource(); src.buffer = buf;
+  const filt = audioCtx.createBiquadFilter(); filt.type='bandpass'; filt.frequency.value=1800; filt.Q.value=0.5;
+  const gain = audioCtx.createGain(); const now = audioCtx.currentTime;
+  gain.gain.setValueAtTime(0.35, now); gain.gain.exponentialRampToValueAtTime(0.001, now+0.22);
+  src.connect(filt); filt.connect(gain); gain.connect(audioCtx.destination); src.start();
+}
+document.getElementById("audioBtn").addEventListener("click", () => {
+  if (!audioCtx) { initAudio(); }
+  else {
+    audioEnabled = !audioEnabled;
+    document.getElementById("audioBtn").textContent = audioEnabled ? "🔊 Sound ON" : "🔇 Sound OFF";
+    if (!audioEnabled && windGain) {
+      const t = audioCtx.currentTime;
+      windGain.gain.setTargetAtTime(0,t,0.1); windHowlGain.gain.setTargetAtTime(0,t,0.1);
+      tornadoGain.gain.setTargetAtTime(0,t,0.1); tornadoGain2.gain.setTargetAtTime(0,t,0.1);
+    }
+  }
+});
+
+// ─── Tornado system ───────────────────────────────────────────────────
+const activeTornadoes = [];
+let tornadoSpawnTimer = CFG.TORNADO_SPAWN_INTERVAL_MIN + Math.random() * (CFG.TORNADO_SPAWN_INTERVAL_MAX - CFG.TORNADO_SPAWN_INTERVAL_MIN);
+
+function createTornadoMesh(strength) {
+  const height = 55, bottomR = 1.2 + strength*0.018, topR = 9 + strength*0.06;
+  const g = new THREE.CylinderGeometry(topR, bottomR, height, 18, 4, true);
+  const m = new THREE.MeshBasicMaterial({ color: 0x222b33, transparent: true, opacity: 0.42, side: THREE.DoubleSide });
+  return new THREE.Mesh(g, m);
+}
+function spawnTornado(manual = false) {
+  const px = pBody.position.x, pz = pBody.position.z;
+  const angle = Math.random() * Math.PI * 2;
+  const dist  = manual ? 25 : (40 + Math.random() * 50);
+  const tx = clamp(px + Math.cos(angle)*dist, 8, WS - 8);
+  const tz = clamp(pz + Math.sin(angle)*dist, 8, WS - 8);
+  const strength = CFG.TORNADO_STRENGTH_MIN + Math.random()*(CFG.TORNADO_STRENGTH_MAX-CFG.TORNADO_STRENGTH_MIN);
+  const lifetime = CFG.TORNADO_LIFETIME_MIN + Math.random()*(CFG.TORNADO_LIFETIME_MAX-CFG.TORNADO_LIFETIME_MIN);
+  const ma = Math.atan2(pz - tz, px - tx) + (Math.random()-0.5)*0.8;
+  const mesh = createTornadoMesh(strength); scene.add(mesh);
+  activeTornadoes.push({
+    x: tx, z: tz, strength,
+    radius: CFG.TORNADO_RADIUS_BASE + strength*0.08,
+    lifetime, age: 0,
+    vx: Math.cos(ma) * CFG.TORNADO_SPEED, vz: Math.sin(ma) * CFG.TORNADO_SPEED,
+    mesh, liftTimer: 0,
+  });
+  showNotif("🌪️ TORNADO incoming!");
+}
+
+function tornadoLiftBlocks(t) {
+  const cx = Math.round(t.x), cz = Math.round(t.z);
+  const r = Math.ceil(t.radius);
+  for (let ox = -r; ox <= r; ox++) {
+    for (let oz = -r; oz <= r; oz++) {
+      const x = cx + ox, z = cz + oz;
+      if (x < 0 || x >= WS || z < 0 || z >= WS) continue;
+      const dist = Math.sqrt(ox*ox + oz*oz);
+      if (dist > t.radius) continue;
+      const intensity = clamp(1 - dist/t.radius, 0, 1);
+      let yTop = topY[topIdx(x, z)];
+      if (yTop < 0) continue;
+      const layers = 1 + Math.floor(intensity * 3);
+      for (let l = 0; l < layers; l++) {
+        const y = yTop - l; if (y < 0) break;
+        const e = reg.get(ikey(x, y, z));
+        if (e === undefined) continue;
+        const type = unpackType(e);
+        if (type === 1) continue;
+        if (Math.random() < intensity * 0.55) {
+          const tang = Math.atan2(oz, ox) + Math.PI*0.5;
+          const ts = t.strength * intensity * 0.35;
+          const vx = Math.cos(tang)*ts + (Math.random()-0.5)*6;
+          const vy = 4 + Math.random() * t.strength * 0.18 * intensity;
+          const vz = Math.sin(tang)*ts + (Math.random()-0.5)*6;
+          breakBlockAtPos(x, y, z);
+          spawnWindBlock(type, x, y, z, vx, vy, vz);
+        }
+      }
+    }
+  }
+}
+
+function updateTornadoes(dt) {
+  tornadoSpawnTimer -= dt;
+  if (tornadoSpawnTimer <= 0 && activeTornadoes.length < 3) {
+    spawnTornado();
+    tornadoSpawnTimer = CFG.TORNADO_SPAWN_INTERVAL_MIN + Math.random()*(CFG.TORNADO_SPAWN_INTERVAL_MAX - CFG.TORNADO_SPAWN_INTERVAL_MIN);
+  }
+  let nearestDist = Infinity;
+  for (let i = activeTornadoes.length - 1; i >= 0; i--) {
+    const t = activeTornadoes[i];
+    t.age += dt;
+    if (t.age >= t.lifetime) { scene.remove(t.mesh); activeTornadoes.splice(i, 1); continue; }
+    const fadeIn = clamp(t.age/4, 0, 1), fadeOut = clamp((t.lifetime - t.age)/6, 0, 1);
+    t.mesh.material.opacity = fadeIn * fadeOut * 0.44;
+    t.x += t.vx * dt; t.z += t.vz * dt;
+    const dx = pBody.position.x - t.x, dz = pBody.position.z - t.z;
+    const d = Math.sqrt(dx*dx + dz*dz);
+    if (d < nearestDist) nearestDist = d;
+    if (d > 15) { t.vx += (dx/d)*0.4*dt; t.vz += (dz/d)*0.4*dt; }
+    t.vx += (Math.random()-0.5)*2.0*dt; t.vz += (Math.random()-0.5)*2.0*dt;
+    const spd = Math.sqrt(t.vx*t.vx + t.vz*t.vz);
+    if (spd > CFG.TORNADO_SPEED * 1.8) { const k = CFG.TORNADO_SPEED*1.8/spd; t.vx *= k; t.vz *= k; }
+    if (t.x < 6 || t.x > WS - 6) t.vx *= -1;
+    if (t.z < 6 || t.z > WS - 6) t.vz *= -1;
+    const gy = groundH(Math.round(t.x), Math.round(t.z));
+    t.mesh.position.set(t.x, gy + 28, t.z); t.mesh.rotation.y += dt * 2.8;
+    t.liftTimer -= dt;
+    if (t.liftTimer <= 0) { t.liftTimer = CFG.TORNADO_LIFT_INTERVAL; tornadoLiftBlocks(t); }
+    if (d < t.radius * 2.5) {
+      const inten = clamp(1 - d/(t.radius*2.5), 0, 1);
+      const push  = t.strength * inten * 0.06;
+      const pa    = Math.atan2(t.z - pBody.position.z, t.x - pBody.position.x) + Math.PI*0.5;
+      moveAxis('x', Math.cos(pa) * push * dt); moveAxis('z', Math.sin(pa) * push * dt);
+      if (!onGround) velY += t.strength * inten * 0.35 * dt;
+      if (d < t.radius && Math.random() < 0.02) showNotif("🌪️ Caught in tornado!");
+    }
+  }
+  return nearestDist;
+}
+
+// ─── Wind block displacement (uses heightmap) ─────────────────────────
+let windBlockTimer = 0;
+function updateWindBlockDisplacement(localWind, localGust, dt) {
+  windBlockTimer -= dt;
+  if (windBlockTimer > 0) return;
+  windBlockTimer = CFG.WIND_BLOCK_SCAN_INTERVAL;
+  const total = localWind + localGust * 0.55;
+  if (total < 3.5) return;
+  const cx = Math.round(pBody.position.x), cz = Math.round(pBody.position.z);
+  const range = 28;
+  const attempts = Math.min(Math.floor(total * 0.5), 20);
+  for (let a = 0; a < attempts; a++) {
+    const x = cx + Math.floor((Math.random()-0.5) * range * 2);
+    const z = cz + Math.floor((Math.random()-0.5) * range * 2);
+    if (x < 0 || x >= WS || z < 0 || z >= WS) continue;
+    const yTop = topY[topIdx(x, z)];
+    if (yTop < 0) continue;
+    const e = reg.get(ikey(x, yTop, z));
+    if (e === undefined) continue;
+    const type = unpackType(e);
+    if (type === 1) continue;
+    const w = blockWeight(type, x, yTop, z);
+    const liftThr = w * CFG.WIND_LIFT_BLOCK_MULT;
+    if (total > liftThr) {
+      const excess = total - liftThr;
+      const prob   = clamp(excess / 18, 0, 0.85);
+      if (Math.random() < prob) {
+        const vx = windDir.x * (total*0.28 + (Math.random()-0.5)*5);
+        const vy = 1.5 + Math.random() * total * 0.08;
+        const vz = windDir.y * (total*0.28 + (Math.random()-0.5)*5);
+        breakBlockAtPos(x, yTop, z);
+        spawnWindBlock(type, x, yTop, z, vx, vy, vz);
+      }
+    }
+  }
+}
+
+// ─── Input ────────────────────────────────────────────────────────────
+const keys = { w:false, a:false, s:false, d:false };
+let jumpPressed = false;
+document.addEventListener("keydown", e => {
+  const k = e.key.toLowerCase();
+  if (k === 't') { spawnTornado(true); return; }
+  if (e.code === "Space") jumpPressed = true;
+  if (e.key in keys) keys[e.key] = true;
+  if (e.key === '1') { selectedSlot = 0; buildHotbar(); }
+  if (e.key === '2') { selectedSlot = 1; buildHotbar(); }
+});
+document.addEventListener("keyup", e => { if (e.key in keys) keys[e.key] = false; });
+
+// ─── DDA voxel raycast (replaces InstancedMesh raycast) ───────────────
+const _ro = new THREE.Vector3(), _rd = new THREE.Vector3();
+let lookHit = null; // { x, y, z, type, idx, nx, ny, nz } or null
+function pickBlock() {
+  camera.getWorldPosition(_ro);
+  camera.getWorldDirection(_rd);
+  let px = _ro.x, py = _ro.y, pz = _ro.z;
+  let dx = _rd.x, dy = _rd.y, dz = _rd.z;
+  if (dx === 0) dx = 1e-9;
+  if (dy === 0) dy = 1e-9;
+  if (dz === 0) dz = 1e-9;
+  let bx = Math.round(px), by = Math.round(py), bz = Math.round(pz);
+  const stepX = dx > 0 ? 1 : -1;
+  const stepY = dy > 0 ? 1 : -1;
+  const stepZ = dz > 0 ? 1 : -1;
+  const tDX = Math.abs(1 / dx), tDY = Math.abs(1 / dy), tDZ = Math.abs(1 / dz);
+  // Distance to first voxel boundary in each axis (voxel face at integer + 0.5)
+  let tX = ((bx + (stepX > 0 ? 0.5 : -0.5)) - px) / dx;
+  let tY = ((by + (stepY > 0 ? 0.5 : -0.5)) - py) / dy;
+  let tZ = ((bz + (stepZ > 0 ? 0.5 : -0.5)) - pz) / dz;
+  let nx = 0, ny = 0, nz = 0;
+  const reach = CFG.REACH;
+  // First check the voxel the camera is inside.
+  let e = reg.get(ikey(bx, by, bz));
+  if (e !== undefined) return { x:bx, y:by, z:bz, type:unpackType(e), idx:unpackIdx(e), nx:0, ny:0, nz:0 };
+  for (let i = 0; i < 64; i++) {
+    if (tX < tY) {
+      if (tX < tZ) { if (tX > reach) return null; bx += stepX; tX += tDX; nx = -stepX; ny = 0; nz = 0; }
+      else        { if (tZ > reach) return null; bz += stepZ; tZ += tDZ; nx = 0; ny = 0; nz = -stepZ; }
+    } else {
+      if (tY < tZ) { if (tY > reach) return null; by += stepY; tY += tDY; nx = 0; ny = -stepY; nz = 0; }
+      else        { if (tZ > reach) return null; bz += stepZ; tZ += tDZ; nx = 0; ny = 0; nz = -stepZ; }
+    }
+    e = reg.get(ikey(bx, by, bz));
+    if (e !== undefined) return { x:bx, y:by, z:bz, type:unpackType(e), idx:unpackIdx(e), nx, ny, nz };
+  }
+  return null;
+}
+
+document.addEventListener("mousedown", e => {
+  if (!controls.isLocked) return;
+  if (e.button === 0) {
+    // Try animal hit first
+    if (tryHitAnimal()) return;
+    if (!lookHit) return;
+    const t = lookHit.type;
+    breakBlockAtPos(lookHit.x, lookHit.y, lookHit.z);
+    // Drop the block as a pickup item instead of instant pickup
+    spawnDropItem(t, lookHit.x, lookHit.y, lookHit.z);
+    playBlockBreak(t);
+  } else if (e.button === 2) {
+    if (!lookHit) {
+      // Right-click air: eat raw meat if holding it
+      const bt = hand[selectedSlot];
+      if (bt === 11) { hunger = Math.min(100, hunger + 28); health = Math.min(100, health + 8); hand[selectedSlot] = null; buildHotbar(); showNotif("🥩 Ate Raw Meat! +28 hunger +8 HP"); playBlockPlace(); }
+      return;
+    }
+    if (lookHit.type === 1) { thirst = Math.min(100, thirst + 35); showNotif("💧 Refreshed!"); playSplash(); return; }
+    const blockType = hand[selectedSlot];
+    if (blockType === null) { showNotif("Slot " + (selectedSlot+1) + " is empty!"); return; }
+    if (blockType === 11) { // eating raw meat
+      hunger = Math.min(100, hunger + 28); health = Math.min(100, health + 8); hand[selectedSlot] = null; buildHotbar(); showNotif("🥩 Ate Raw Meat! +28 hunger +8 HP"); playBlockPlace(); return;
+    }
+    const nx = lookHit.x + lookHit.nx, ny = lookHit.y + lookHit.ny, nz = lookHit.z + lookHit.nz;
+    if (placeBlock(nx, ny, nz, blockType)) { hand[selectedSlot] = null; buildHotbar(); playBlockPlace(); }
+  }
+});
+document.addEventListener("contextmenu", e => e.preventDefault());
+
+// ─── Player state / physics ───────────────────────────────────────────
+let velY = 0, health = 100, hunger = 100, thirst = 100, onGround = false;
+let windSpeed = 0, windTarget = 0;
+const windDir = new THREE.Vector2(1, 0), windDirTarget = new THREE.Vector2(1, 0);
+let windChangeTimer = 0, gustTimer = 0, gustStrength = 0;
+
+const HALF_W = 0.3, EYE_H = 1.62, HEAD_H = 0.18, STEP_UP = 0.55, MAX_STEP = 0.05;
+// Edge rows are non-solid so player can walk off the world edge and fall
+const solid = (bx, by, bz) => {
+  if (bx <= 0 || bx >= WS-1 || bz <= 0 || bz >= WS-1) return false;
+  const e = reg.get(ikey(bx, by, bz)); return e !== undefined && BLK_SOLID[unpackType(e)] === 1;
+};
+
+function collidesAt(px, py, pz) {
+  const x0 = px - HALF_W, x1 = px + HALF_W;
+  const y0 = py - EYE_H,  y1 = py + HEAD_H;
+  const z0 = pz - HALF_W, z1 = pz + HALF_W;
+  const bx0 = Math.floor(x0), bx1 = Math.ceil(x1);
+  const by0 = Math.floor(y0), by1 = Math.ceil(y1);
+  const bz0 = Math.floor(z0), bz1 = Math.ceil(z1);
+  for (let bx = bx0; bx <= bx1; bx++) {
+    for (let by = by0; by <= by1; by++) {
+      for (let bz = bz0; bz <= bz1; bz++) {
+        if (!solid(bx, by, bz)) continue;
+        if (x1 <= bx - 0.5 || x0 >= bx + 0.5) continue;
+        if (y1 <= by - 0.5 || y0 >= by + 0.5) continue;
+        if (z1 <= bz - 0.5 || z0 >= bz + 0.5) continue;
+        return true;
+      }
+    }
+  }
+  return false;
+}
+function moveAxis(axis, delta) {
+  if (Math.abs(delta) < 1e-6) return { moved: 0, hit: false };
+  const sign = delta > 0 ? 1 : -1;
+  let remaining = Math.abs(delta), moved = 0;
+  const p = pBody.position;
+  while (remaining > 1e-6) {
+    const step = Math.min(remaining, MAX_STEP);
+    const nx = p.x + (axis === 'x' ? sign*step : 0);
+    const ny = p.y + (axis === 'y' ? sign*step : 0);
+    const nz = p.z + (axis === 'z' ? sign*step : 0);
+    if (collidesAt(nx, ny, nz)) return { moved: sign*moved, hit: true };
+    p[axis] += sign*step; moved += step; remaining -= step;
+  }
+  return { moved: sign*moved, hit: false };
+}
+function moveH(axis, delta) {
+  const r = moveAxis(axis, delta);
+  if (r.hit && onGround) {
+    const sy = pBody.position.y;
+    moveAxis('y', STEP_UP);
+    const r2 = moveAxis(axis, delta);
+    if (r2.hit) pBody.position.y = sy;
+    else moveAxis('y', -(STEP_UP + 0.15));
+  }
+}
+function inWater() {
+  for (let dy = 0; dy < 2; dy++) {
+    const bx = Math.round(pBody.position.x);
+    const by = Math.floor(pBody.position.y - EYE_H + dy*0.8);
+    const bz = Math.round(pBody.position.z);
+    const e = reg.get(ikey(bx, by, bz));
+    if (e !== undefined && unpackType(e) === 1) return true;
+  }
+  return false;
+}
+function isInLeafZone() {
+  const bx = Math.round(pBody.position.x), bz = Math.round(pBody.position.z);
+  const feetY = pBody.position.y - EYE_H;
+  for (let dy = 0; dy <= 2; dy++) {
+    const e = reg.get(ikey(bx, Math.floor(feetY + dy*0.5), bz));
+    if (e !== undefined && unpackType(e) === 6) return true;
+  }
+  return false;
+}
+function nearbyBlockGravity() {
+  const cx = Math.round(pBody.position.x);
+  const cy = Math.floor(pBody.position.y - EYE_H);
+  const cz = Math.round(pBody.position.z);
+  let mass = 0;
+  for (let dx = -2; dx <= 2; dx++) {
+    for (let dy = -2; dy <= 2; dy++) {
+      for (let dz = -2; dz <= 2; dz++) {
+        const e = reg.get(ikey(cx+dx, cy+dy, cz+dz));
+        if (e === undefined) continue;
+        const type = unpackType(e);
+        if (BLK_SOLID[type] === 0) continue;
+        const dist = Math.abs(dx) + Math.abs(dy) + Math.abs(dz);
+        mass += blockWeight(type, cx+dx, cy+dy, cz+dz) / (1 + dist);
+      }
+    }
+  }
+  return mass;
+}
+function getBlockBelowPlayer() {
+  const bx = Math.round(pBody.position.x);
+  const by = Math.floor(pBody.position.y - EYE_H) - 1;
+  const bz = Math.round(pBody.position.z);
+  const e = reg.get(ikey(bx, by, bz));
+  if (e === undefined) return null;
+  const type = unpackType(e);
+  return BLK_SOLID[type] === 1 ? type : null;
+}
+function applyFallDamage(impactSpeed, isInWater) {
+  if (isInWater) return 0;
+  if (impactSpeed <= CFG.FALL_THRESHOLD) return 0;
+  const landType = getBlockBelowPlayer();
+  const landMult = landType !== null ? BLK_LANDM[landType] : 1.0;
+  if (landMult <= 0) return 0;
+  const excess = impactSpeed - CFG.FALL_THRESHOLD;
+  const dmg = excess * excess * CFG.FALL_MULT * landMult;
+  health = Math.max(0, health - dmg);
+  const severity = dmg < 5 ? 'Ouch' : dmg < 20 ? 'Hard landing' : dmg < 50 ? 'Brutal fall' : '💀 Lethal fall';
+  const icons = ['🌿','💧','🟫','🪨','🏖️','🪵','🍃','⚫','🌳','❄️','🧊'];
+  const icon  = (landType !== null && icons[landType]) ? icons[landType] : '💥';
+  const surface = landType !== null ? BLOCK_DEFS[landType].name : 'void';
+  showNotif(`${icon} ${severity} on ${surface}! −${Math.ceil(dmg)} HP`);
+  return dmg;
+}
+function windExposureAtPlayer() {
+  const cx = Math.round(pBody.position.x), cz = Math.round(pBody.position.z);
+  const roofY = Math.floor(pBody.position.y + HEAD_H) + 1;
+  let open = 0, total = 0;
+  const heights = CFG.SHELTER_HEIGHTS, R = CFG.SHELTER_RADIUS, depth = CFG.SHELTER_SCAN_DEPTH;
+  for (let h = 0; h < heights.length; h++) {
+    const dy = heights[h];
+    for (let ox = -R; ox <= R; ox++) {
+      for (let oz = -R; oz <= R; oz++) {
+        total++;
+        const x = cx + ox, z = cz + oz;
+        let blocked = false;
+        for (let y = roofY + dy; y <= roofY + dy + depth; y++) {
+          const e = reg.get(ikey(x, y, z));
+          if (e !== undefined && BLK_SOLID[unpackType(e)] === 1) { blocked = true; break; }
+        }
+        if (!blocked) open++;
+      }
+    }
+  }
+  const openRatio = open / total;
+  if (openRatio <= 0) return 0;
+  const leak = clamp((windSpeed - CFG.SHELTER_LEAK_START) / CFG.SHELTER_LEAK_RANGE, 0, 1) * CFG.SHELTER_LEAK_FACTOR;
+  return clamp(openRatio + leak * (1 - openRatio), 0, 1);
+}
+
+// ─── Spawn ────────────────────────────────────────────────────────────
+{
+  const sz = WS / 2;
+  const treeNear = (x, z, r=2) => TREES.some(t => Math.abs(t.x-x) <= r && Math.abs(t.z-z) <= r);
+  let sx = sz, sz2 = sz;
+  outer:
+  for (let r = 0; r < sz; r++) {
+    const cand = [[sz+r,sz],[sz-r,sz],[sz,sz+r],[sz,sz-r],[sz+r,sz+r],[sz-r,sz-r],[sz+r,sz-r],[sz-r,sz+r]];
+    for (const [x, z] of cand) {
+      const gx = clamp(Math.floor(x), 0, WS-1), gz = clamp(Math.floor(z), 0, WS-1);
+      if (groundH(gx, gz) > CFG.WATER_LVL + 1 && !treeNear(gx, gz)) { sx = gx; sz2 = gz; break outer; }
+    }
+  }
+  pBody.position.set(sx, groundH(sx, sz2) + EYE_H + 4, sz2);
+}
+
+// ─── HUD throttling ──────────────────────────────────────────────────
+let notifTimer = 0, notifText = '';
+function showNotif(text) { notifText = text; notifTimer = 2.5; hudDirty = true; }
+function bar(val, max, fg, bg='#333') {
+  const pct = clamp(val / max * 100, 0, 100);
+  return `<span style="display:inline-block;width:90px;height:9px;background:${bg};border-radius:4px;vertical-align:middle;overflow:hidden;border:1px solid rgba(0,0,0,0.5)"><span style="display:block;width:${pct}%;height:100%;background:${fg};border-radius:4px"></span></span>`;
+}
+let hudUpdateTimer = 0, hudDirty = true;
+const hudEl = document.getElementById("hud"), windEl = document.getElementById("wind"), fpsEl = document.getElementById("fps");
+
+// FPS tracker
+let fpsAccumTime = 0, fpsAccumFrames = 0, fpsLastUpdate = 0;
+
+// ─── Game loop ───────────────────────────────────────────────────────
+const clock = new THREE.Clock();
+let totalTime = CFG.START_T;
+let wasInWater = false;
+const fallingBlocks = [];
+
+// ─── Dropped items (block pickups) ───────────────────────────────────
+// When you break a block it falls and lands as a floating pickup.
+// Walk within 1.6 blocks to collect. Fades out after ITEM_LIFETIME seconds.
+const ITEM_LIFETIME = 20;
+const droppedItems = []; // { type, mesh, px, py, pz, vy, age, bobPhase }
+const _itemGeo = new THREE.BoxGeometry(0.38, 0.38, 0.38);
+
+function spawnDropItem(type, x, y, z) {
+  const def = BLOCK_DEFS[type];
+  const mat = new THREE.MeshLambertMaterial({
+    color: def.color, transparent: true, opacity: 1,
+    depthWrite: true,
+  });
+  const mesh = new THREE.Mesh(_itemGeo, mat);
+  mesh.position.set(x, y + 0.6, z);
+  scene.add(mesh);
+  droppedItems.push({ type, mesh, px: x, py: y + 0.6, pz: z, vy: 2.5 + Math.random(), age: 0, bobPhase: Math.random() * Math.PI * 2 });
+}
+
+function updateDroppedItems(dt) {
+  const px = pBody.position.x, py = pBody.position.y - EYE_H + 0.5, pz = pBody.position.z;
+  for (let i = droppedItems.length - 1; i >= 0; i--) {
+    const it = droppedItems[i];
+    it.age += dt;
+
+    // Despawn with fade
+    if (it.age > ITEM_LIFETIME) {
+      scene.remove(it.mesh); it.mesh.material.dispose(); droppedItems.splice(i, 1); continue;
+    }
+
+    // Gravity until it lands on something solid
+    if (!it.landed) {
+      it.vy -= 22 * dt;
+      it.py += it.vy * dt;
+      const gy = Math.floor(it.py - 0.2);
+      const e = reg.get(ikey(Math.round(it.px), gy, Math.round(it.pz)));
+      if (e !== undefined && BLK_SOLID[unpackType(e)] === 1) {
+        it.py = gy + 1.19; it.vy = 0; it.landed = true;
+      }
+      if (it.py < -15) { scene.remove(it.mesh); it.mesh.material.dispose(); droppedItems.splice(i, 1); continue; }
+    }
+
+    // Bob up and down once landed
+    const bobY = it.landed ? Math.sin(it.bobPhase + totalTime * 2.5) * 0.12 : 0;
+    it.mesh.position.set(it.px, it.py + bobY, it.pz);
+    it.mesh.rotation.y += dt * 1.8;
+
+    // Fade out in last 4 s
+    const fadeOut = it.age > ITEM_LIFETIME - 4 ? (ITEM_LIFETIME - it.age) / 4 : 1;
+    it.mesh.material.opacity = fadeOut;
+
+    // Pickup radius
+    const dx = it.px - px, dz = it.pz - pz, dy = (it.py - py);
+    if (dx*dx + dy*dy + dz*dz < 1.35 * 1.35) {
+      pickUp(it.type);
+      scene.remove(it.mesh); it.mesh.material.dispose(); droppedItems.splice(i, 1);
+      showNotif(`Picked up ${BLOCK_DEFS[it.type].name}`);
+    }
+  }
+}
+
+const errorDisplayEl = document.getElementById("errorDisplay");
+let errorTimer = 0;
+
+function showError(msg) {
+  console.error(msg);
+  errorDisplayEl.textContent = msg;
+  errorDisplayEl.style.display = "block";
+  errorTimer = 5; // Show for 5 seconds
+}
+
+window.addEventListener("error", e => {
+  showError(`JS Error: ${e.message} at ${e.filename}:${e.lineno}`);
+});
+
+window.addEventListener("unhandledrejection", e => {
+  showError(`Unhandled Promise Rejection: ${e.reason}`);
+});
+let adminConsoleVisible = false;
+const adminConsoleEl = document.getElementById("adminConsole");
+const adminInputEl = document.getElementById("adminInput");
+const adminOutputEl = document.getElementById("adminOutput");
+
+function toggleAdminConsole() {
+  adminConsoleVisible = !adminConsoleVisible;
+  adminConsoleEl.style.display = adminConsoleVisible ? "block" : "none";
+  if (adminConsoleVisible) adminInputEl.focus();
+}
+
+function executeAdminCommand(cmd) {
+  const parts = cmd.trim().split(' ');
+  const command = parts[0].toLowerCase();
+  let output = "";
+  try {
+    switch (command) {
+      case 'spawn':
+        if (parts[1] === 'animal' && parts[2]) {
+          const type = ['cow', 'pig', 'chicken'].indexOf(parts[2].toLowerCase());
+          if (type >= 0) {
+            const px = pBody.position.x, pz = pBody.position.z;
+            const def = ANIMAL_DEFS[type];
+            const mesh = makeAnimalMesh(def);
+            mesh.position.set(px, groundH(Math.round(px), Math.round(pz)), pz);
+            scene.add(mesh);
+            animals.push({ type, mesh, px, py: mesh.position.y, pz, vx:0, vz:0, hp:def.hp, maxHp:def.hp, wanderTimer:Math.random()*3, wanderAngle:Math.random()*Math.PI*2, dead:false, despawnTimer:0, hitFlash:0 });
+            output = `Spawned ${def.name}`;
+          } else output = "Invalid animal type";
+        } else output = "Usage: spawn animal <cow|pig|chicken>";
+        break;
+      case 'tornado':
+        spawnTornado(true);
+        output = "Spawned tornado";
+        break;
+      case 'heal':
+        health = 100; hunger = 100; thirst = 100;
+        output = "Player healed";
+        break;
+      case 'teleport':
+        if (parts.length >= 3) {
+          const tx = parseFloat(parts[1]), tz = parseFloat(parts[2]);
+          pBody.position.set(tx, groundH(tx, tz) + EYE_H, tz);
+          output = `Teleported to ${tx}, ${tz}`;
+        } else output = "Usage: teleport <x> <z>";
+        break;
+      default:
+        output = "Unknown command. Try: spawn animal <type>, tornado, heal, teleport <x> <z>";
+    }
+  } catch (e) {
+    output = `Error: ${e.message}`;
+  }
+  adminOutputEl.textContent = output;
+}
+
+document.getElementById("adminSubmit").addEventListener("click", () => executeAdminCommand(adminInputEl.value));
+document.getElementById("adminClose").addEventListener("click", toggleAdminConsole);
+document.addEventListener("keydown", e => {
+  if (e.key === "/") { e.preventDefault(); toggleAdminConsole(); }
+});
+// Types: 0=Cow, 1=Pig, 2=Chicken
+const ANIMAL_DEFS = [
+  { name:'Cow',     color:0x7a5230, headColor:0x5c3a1e, w:0.8, h:0.85, d:1.4, hp:3, meatDrop:[2,4], speed:2.8, fleeSpeed:5.0, bobAmt:0.04 },
+  { name:'Pig',     color:0xe8a0a0, headColor:0xd07070, w:0.7, h:0.65, d:1.1, hp:2, meatDrop:[1,3], speed:3.2, fleeSpeed:6.0, bobAmt:0.05 },
+  { name:'Chicken', color:0xf0f0d8, headColor:0xe0d060, w:0.4, h:0.45, d:0.5, hp:1, meatDrop:[1,2], speed:3.5, fleeSpeed:7.5, bobAmt:0.08 },
+];
+
+// ─── STL model loading (drop cow.stl / pig.stl / chicken.stl next to index.html)
+const _gltfLoader = new STLLoader();
+const animalModels = { Cow: null, Pig: null, Chicken: null };
+const _glbFiles = [
+  { name: 'Cow',     file: './cow.stl'     },
+  { name: 'Pig',     file: './pig.stl'     },
+  { name: 'Chicken', file: './chicken.stl' },
+];
+for (const { name, file } of _glbFiles) {
+  _gltfLoader.load(file, geometry => {
+    animalModels[name] = geometry;
+    console.log(`Loaded ${file}`);
+  }, undefined, error => {
+    console.error(`Failed to load ${file}:`, error);
+    showNotif(`⚠️ Failed to load ${name} model`);
+  });
+}
+
+const animals = [];
+const animalRng = mulberry32(99991);
+function makeAnimalMesh(def) {
+  const g = new THREE.Group();
+
+  // Use STL model if loaded, otherwise fall back to box geometry
+  const stlGeometry = animalModels[def.name];
+  if (stlGeometry) {
+    const model = new THREE.Mesh(stlGeometry, new THREE.MeshLambertMaterial({ color: def.color }));
+    // Scale model to fit the def's bounding size
+    const box = new THREE.Box3().setFromObject(model);
+    const size = box.getSize(new THREE.Vector3());
+    const scale = Math.min(def.w / size.x, def.h / size.y, def.d / size.z);
+    model.scale.setScalar(scale);
+    // Sit on ground
+    const box2 = new THREE.Box3().setFromObject(model);
+    model.position.y = -box2.min.y;
+    g.add(model);
+    g.userData.bodyMesh = model;
+    return g;
+  }
+
+  // ── Box fallback ──
+  const bodyMat = new THREE.MeshLambertMaterial({ color: def.color });
+  const headMat = new THREE.MeshLambertMaterial({ color: def.headColor });
+  const legW  = def.w * 0.22, legH = def.h * 0.52, legD = def.w * 0.22;
+  const bodyH = def.h * 0.58, bodyBaseY = legH;
+  const body = new THREE.Mesh(new THREE.BoxGeometry(def.w, bodyH, def.d), bodyMat);
+  body.position.y = bodyBaseY + bodyH * 0.5;
+  g.add(body);
+  const headW = def.w * 0.55, headH = def.h * 0.5, headD = def.d * 0.38;
+  const head = new THREE.Mesh(new THREE.BoxGeometry(headW, headH, headD), headMat);
+  head.position.set(0, bodyBaseY + bodyH + headH * 0.1, def.d * 0.38);
+  g.add(head);
+  const legGeo = new THREE.BoxGeometry(legW, legH, legD);
+  const lx = def.w * 0.28, lz = def.d * 0.30;
+  for (const [ox, oz] of [[-lx,-lz],[lx,-lz],[-lx,lz],[lx,lz]]) {
+    const leg = new THREE.Mesh(legGeo, bodyMat);
+    leg.position.set(ox, legH * 0.5, oz); g.add(leg);
+  }
+  if (def.name === 'Chicken') {
+    const beak = new THREE.Mesh(new THREE.BoxGeometry(0.06,0.05,0.1), new THREE.MeshLambertMaterial({color:0xffcc00}));
+    beak.position.set(0, bodyBaseY+bodyH+headH*0.1, def.d*0.38+headD*0.5+0.03); g.add(beak);
+  }
+  if (def.name === 'Cow' || def.name === 'Pig') {
+    const snout = new THREE.Mesh(new THREE.BoxGeometry(headW*0.55,headH*0.35,headD*0.35),
+      new THREE.MeshLambertMaterial({color: def.name==='Pig'?0xf4a0a0:0x7a5230}));
+    snout.position.set(0, bodyBaseY+bodyH, def.d*0.38+headD*0.52); g.add(snout);
+  }
+  g.userData.bodyMesh = body;
+  return g;
+}
+// Spawn 8 of each type spread around the map
+for (let type = 0; type < ANIMAL_DEFS.length; type++) {
+  for (let k = 0; k < 8; k++) {
+    for (let attempt = 0; attempt < 30; attempt++) {
+      const ax = 10 + Math.floor(animalRng() * (WS - 20));
+      const az = 10 + Math.floor(animalRng() * (WS - 20));
+      const ay = groundH(ax, az);
+      const bm = biomeAt(ax, az);
+      if (ay <= CFG.WATER_LVL + 1 || bm < 0.2 || bm > 0.82) continue;
+      const def = ANIMAL_DEFS[type];
+      const mesh = makeAnimalMesh(def);
+      mesh.position.set(ax, ay, az);
+      scene.add(mesh);
+      animals.push({
+        type, mesh,
+        px: ax, py: ay, pz: az,
+        vx: 0, vz: 0,
+        hp: def.hp, maxHp: def.hp,
+        wanderTimer: animalRng() * 3,
+        wanderAngle: animalRng() * Math.PI * 2,
+        dead: false, despawnTimer: 0,
+        hitFlash: 0,
+      });
+      break;
+    }
+  }
+}
+/**
+ * Checks if an animal can occupy the given position (avoids solid blocks and water).
+ * @param {number} x - X position.
+ * @param {number} y - Y position.
+ * @param {number} z - Z position.
+ * @returns {boolean} True if position is valid.
+ */
+function animalCanMoveTo(x, y, z) {
+  const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+  // Check feet level and a bit above for obstacles
+  for (let dy = 0; dy <= 1; dy++) {
+    const k = ikey(bx, by + dy, bz);
+    if (reg.has(k)) {
+      const type = unpackType(reg.get(k));
+      if (BLK_SOLID[type]) return false; // Solid block
+    }
+  }
+  // Avoid water
+  if (by <= CFG.WATER_LVL) return false;
+  return true;
+}
+
+/**
+ * Updates all animals: movement, fleeing, respawning, and despawning.
+ * @param {number} dt - Delta time in seconds.
+ */
+function updateAnimals(dt) {
+  const px = pBody.position.x, py = pBody.position.y - EYE_H, pz = pBody.position.z;
+
+  // Respawn dead animals every 60 s
+  animalRespawnTimer -= dt;
+  if (animalRespawnTimer <= 0) {
+    animalRespawnTimer = 60;
+    const counts = [0,0,0];
+    for (const a of animals) if (!a.dead) counts[a.type]++;
+    for (let type = 0; type < ANIMAL_DEFS.length; type++) {
+      if (counts[type] < 6) {
+        for (let attempt = 0; attempt < 40; attempt++) {
+          const ax = clamp(px + (Math.random()-0.5)*80, 10, WS-10);
+          const az = clamp(pz + (Math.random()-0.5)*80, 10, WS-10);
+          const gx = Math.round(ax), gz = Math.round(az);
+          const ay = groundH(gx, gz);
+          if (ay <= CFG.WATER_LVL + 1) continue;
+          const def = ANIMAL_DEFS[type];
+          const mesh = makeAnimalMesh(def);
+          mesh.position.set(ax, ay, az);
+          scene.add(mesh);
+          animals.push({ type, mesh, px:ax, py:ay, pz:az, vx:0, vz:0,
+            hp:def.hp, maxHp:def.hp, wanderTimer:Math.random()*3,
+            wanderAngle:Math.random()*Math.PI*2, dead:false, despawnTimer:0, hitFlash:0 });
+          break;
+        }
+      }
+    }
+  }
+
+  for (let i = animals.length - 1; i >= 0; i--) {
+    const a = animals[i];
+
+    // Despawn after death
+    if (a.dead) {
+      a.despawnTimer -= dt;
+      if (a.despawnTimer <= 0) { scene.remove(a.mesh); animals.splice(i, 1); }
+      else { a.mesh.rotation.z = lerp(a.mesh.rotation.z, Math.PI/2, dt*5); }
+      continue;
+    }
+
+    // Hit flash
+    if (a.hitFlash > 0) {
+      a.hitFlash -= dt;
+      const fl = a.hitFlash > 0 ? 1 : 0;
+      for (const child of a.mesh.children) { if (child.material) child.material.emissive?.setScalar(fl * 0.5); }
+    }
+
+    const def = ANIMAL_DEFS[a.type];
+    const adx = a.px - px, adz = a.pz - pz;
+    const dist2 = adx*adx + adz*adz;
+
+    // Flee from player if close
+    const fleeR = 9.0;
+    if (dist2 < fleeR * fleeR) {
+      const fd = Math.sqrt(dist2) || 1;
+      const fleePush = def.fleeSpeed * (1 - Math.sqrt(dist2)/fleeR);
+      a.vx += (adx/fd) * fleePush * dt;
+      a.vz += (adz/fd) * fleePush * dt;
+    } else {
+      // Wander
+      a.wanderTimer -= dt;
+      if (a.wanderTimer <= 0) {
+        a.wanderTimer = 2.5 + Math.random() * 4;
+        a.wanderAngle += (Math.random()-0.5) * Math.PI;
+      }
+      a.vx += Math.cos(a.wanderAngle) * def.speed * dt;
+      a.vz += Math.sin(a.wanderAngle) * def.speed * dt;
+    }
+
+    // Dampen velocity (no acceleration accumulation)
+    a.vx *= Math.pow(0.10, dt);
+    a.vz *= Math.pow(0.10, dt);
+
+    // Move + world clamp + collision
+    let npx = a.px + a.vx * dt, npz = a.pz + a.vz * dt;
+    npx = clamp(npx, 1, WS - 1); npz = clamp(npz, 1, WS - 1);
+    const gy = groundH(Math.round(npx), Math.round(npz));
+    if (!animalCanMoveTo(npx, gy, npz)) {
+      // Bounce back if blocked
+      a.vx *= -0.5; a.vz *= -0.5;
+      npx = a.px; npz = a.pz;
+    } else {
+      a.px = npx; a.pz = npz; a.py = gy;
+    }
+
+    // Bob + rotate toward movement
+    const bobY = Math.sin(totalTime * 6 * def.bobAmt * 20 + a.px) * def.bobAmt;
+    a.mesh.position.set(a.px, a.py + bobY, a.pz);
+    if (Math.abs(a.vx) + Math.abs(a.vz) > 0.02) {
+      a.mesh.rotation.y = Math.atan2(a.vx, a.vz);
+    }
+  }
+}
+
+/**
+ * Attempts to hit an animal based on the current camera ray.
+ * @returns {boolean} True if an animal was hit.
+ */
+function tryHitAnimal() {
+  camera.getWorldPosition(_ro); camera.getWorldDirection(_rd);
+  let best = null, bestD = 5.5;
+  for (const a of animals) {
+    if (a.dead) continue;
+    const dx = a.px - _ro.x, dy = (a.py + 0.5) - _ro.y, dz = a.pz - _ro.z;
+    // Project onto ray
+    const t = dx*_rd.x + dy*_rd.y + dz*_rd.z;
+    if (t < 0 || t > bestD) continue;
+    const ex = _ro.x + _rd.x*t - a.px, ey = _ro.y + _rd.y*t - (a.py + 0.5), ez = _ro.z + _rd.z*t - a.pz;
+    const def = ANIMAL_DEFS[a.type];
+    if (Math.abs(ex) < def.w && Math.abs(ey) < def.h && Math.abs(ez) < def.d) {
+      bestD = t; best = a;
+    }
+  }
+  if (!best) return false;
+  best.hp--;
+  best.hitFlash = 0.15;
+  if (best.hp <= 0) {
+    // Kill — drop meat
+    const def = ANIMAL_DEFS[best.type];
+    const meatCount = def.meatDrop[0] + Math.floor(Math.random() * (def.meatDrop[1] - def.meatDrop[0] + 1));
+    for (let m = 0; m < meatCount; m++) {
+      const ox = (Math.random()-0.5)*0.8, oz = (Math.random()-0.5)*0.8;
+      spawnDropItem(11, best.px + ox, best.py, best.pz + oz);
+    }
+    best.dead = true; best.despawnTimer = 6;
+    showNotif(`🥩 ${def.name} killed! +${meatCount} Raw Meat`);
+    playBlockBreak(3); // thud sound
+  } else {
+    showNotif(`🗡️ Hit ${ANIMAL_DEFS[best.type].name} (${best.hp}/${best.maxHp} HP)`);
+    playBlockBreak(4);
+  }
+  return true;
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.05);
+  totalTime += dt;
+  if (notifTimer > 0) notifTimer -= dt;
+  if (errorTimer > 0) { errorTimer -= dt; } else { errorDisplayEl.style.display = "none"; }
+
+  // FPS
+  fpsAccumTime += dt; fpsAccumFrames++;
+  if (fpsAccumTime >= 0.5) {
+    fpsEl.textContent = `FPS ${(fpsAccumFrames / fpsAccumTime).toFixed(0)}  ·  blocks ${reg.size}  ·  fall ${fallingBlocks.length}`;
+    fpsAccumTime = 0; fpsAccumFrames = 0;
+  }
+
+  // Wind sim
+  windChangeTimer -= dt;
+  if (windChangeTimer <= 0) {
+    windChangeTimer = CFG.WIND_CHANGE_MIN + Math.random() * (CFG.WIND_CHANGE_MAX - CFG.WIND_CHANGE_MIN);
+    windTarget = Math.random() * CFG.WIND_BASE_MAX;
+    const a = Math.random() * Math.PI * 2;
+    windDirTarget.set(Math.cos(a), Math.sin(a));
+    if (Math.random() < CFG.GUST_CHANCE) {
+      gustTimer = 1.0 + Math.random() * 2.5;
+      gustStrength = CFG.GUST_MIN + Math.random() * CFG.GUST_SPREAD;
+      const ga = a + (Math.random()-0.5)*0.9;
+      windDirTarget.set(Math.cos(ga), Math.sin(ga));
+    }
+  }
+  if (gustTimer > 0) gustTimer -= dt;
+  if (gustTimer <= 0) gustStrength = 0;
+  const gustNow = gustStrength;
+  windSpeed += (windTarget + gustNow - windSpeed) * dt * CFG.WIND_SPEED_LERP;
+  windDir.lerp(windDirTarget, dt * CFG.WIND_DIR_LERP).normalize();
+
+  const water = inWater();
+  if (water && !wasInWater) playSplash();
+  wasInWater = water;
+
+  const shelter   = windExposureAtPlayer();
+  const localWind = windSpeed * shelter;
+  const localGust = gustNow * shelter;
+
+  const nearestTornadoDist = updateTornadoes(dt);
+  updateWindBlockDisplacement(localWind, localGust, dt);
+  updateAudio(localWind, localGust, nearestTornadoDist);
+
+  // Horizontal movement
+  if (controls.isLocked) {
+    const ctrlPenalty = 1 / (1 + localWind*0.055 + localGust*0.02);
+    const sp = CFG.WALK_SPD * ctrlPenalty * (water ? CFG.WATER_SLOW : 1);
+    const ox = pBody.position.x, oz = pBody.position.z;
+    if (keys.w) controls.moveForward( sp*dt);
+    if (keys.s) controls.moveForward(-sp*dt);
+    if (keys.a) controls.moveRight(  -sp*dt);
+    if (keys.d) controls.moveRight(   sp*dt);
+    const dx = pBody.position.x - ox, dz = pBody.position.z - oz;
+    pBody.position.x = ox; pBody.position.z = oz;
+    moveH('x', dx); moveH('z', dz);
+
+    if (onGround && (keys.w || keys.s || keys.a || keys.d)) {
+      stepTimer -= dt;
+      if (stepTimer <= 0) { const st = getBlockBelowPlayer(); if (st !== null) playFootstep(st); stepTimer = 0.38; }
+    } else { stepTimer = 0; }
+
+    const drift = (localWind * CFG.WIND_DIRIFT + localGust * CFG.WIND_GUST_DRIFT) * dt;
+    moveH('x', windDir.x * drift); moveH('z', windDir.y * drift);
+    if (!onGround && (localWind > 6 || localGust > 10)) {
+      const airPush = ((localWind-6) * CFG.WIND_AIR_PUSH + Math.max(0, localGust-10) * CFG.WIND_AIR_GUST) * dt;
+      moveAxis('x', windDir.x * airPush); moveAxis('z', windDir.y * airPush);
+    }
+    const lift = (Math.max(0, localGust - CFG.PLAYER_WEIGHT) * CFG.WIND_LIFT_BASE) +
+                 Math.max(0, localWind - CFG.PLAYER_WEIGHT*0.75) * CFG.WIND_LIFT_GUST;
+    if (lift > 0) velY += lift * dt;
+  }
+
+  // Vertical physics
+  const blockMass = nearbyBlockGravity();
+  velY -= ((water ? CFG.W_GRAV : CFG.GRAVITY) + blockMass * 0.18) * dt;
+  if (water) { velY += CFG.W_BUOY * dt; velY *= Math.pow(0.80, dt * 60); }
+  if (velY < -60) velY = -60;
+  if (jumpPressed && (onGround || water)) { velY = CFG.JUMP; onGround = false; }
+  jumpPressed = false;
+  if (velY < -2 && !onGround && !water && isInLeafZone()) {
+    velY *= Math.pow(CFG.LEAF_FALL_DRAG, dt * 60);
+    if (velY < -CFG.LEAF_TERM_VEL) velY = -CFG.LEAF_TERM_VEL;
+  }
+  const prevVelY = velY;
+  const ry = moveAxis('y', velY * dt);
+  if (ry.hit) {
+    if (velY < 0) { onGround = true; applyFallDamage(-prevVelY, water); }
+    velY = 0;
+  } else { onGround = false; }
+  if (pBody.position.y < -30) { const sx = WS / 2; pBody.position.set(sx, groundH(sx, sx) + EYE_H + 3, sx); velY = 0; }
+
+  // Survival stats
+  hunger = Math.max(hunger - CFG.HUNGER_DRAIN * dt, 0);
+  thirst = Math.max(thirst - CFG.THIRST_DRAIN * dt, 0);
+  if (water) thirst = Math.min(100, thirst + 4 * dt);
+  if (hunger === 0) health = Math.max(health - CFG.STARVE * dt, 0);
+  if (thirst === 0) health = Math.max(health - CFG.DEHYDRATE * dt, 0);
+
+  // Tree motion
+  const windOut = windSpeed * CFG.TREE_SWAY_BASE;
+  const swayTime = totalTime * (CFG.TREE_SWAY_RATE + windSpeed * CFG.TREE_SWAY_WIND);
+  updateTreeMotion(dt, windOut, windDir.x, windDir.y, swayTime, totalTime);
+
+  // Wind particles
+  updateWindParticles(dt, windSpeed + gustNow * 0.5, gustNow, windDir.x, windDir.y, nearestTornadoDist, shelter);
+
+  // Dropped items & animals
+  updateDroppedItems(dt);
+  updateAnimals(dt);
+
+  // Falling blocks
+  for (let i = fallingBlocks.length - 1; i >= 0; i--) {
+    const f = fallingBlocks[i];
+    f.vy -= CFG.GRAVITY * dt;
+    f.vx += windDir.x * localWind * 0.012 * dt;
+    f.vz += windDir.y * localWind * 0.012 * dt;
+    f.px += f.vx * dt; f.py += f.vy * dt; f.pz += f.vz * dt;
+    f.mesh.position.set(f.px, f.py, f.pz);
+    f.mesh.rotation.x += f.spinX * dt;
+    f.mesh.rotation.y += f.spinY * dt;
+    f.mesh.rotation.z += f.spinZ * dt;
+    if (f.py < -30) { scene.remove(f.mesh); f.mesh.material.dispose(); fallingBlocks.splice(i, 1); continue; }
+    const gx = Math.round(f.px), gz = Math.round(f.pz), gy = Math.floor(f.py - 0.5);
+    const e = reg.get(ikey(gx, gy, gz));
+    if (e !== undefined && BLK_SOLID[unpackType(e)] === 1) {
+      placeBlock(gx, gy + 1, gz, f.type);
+      scene.remove(f.mesh); f.mesh.material.dispose();
+      fallingBlocks.splice(i, 1);
+      continue;
+    }
+  }
+
+  // Picking / outline (DDA voxel raycast)
+  lookHit = pickBlock();
+  if (lookHit) { outline.position.set(lookHit.x, lookHit.y, lookHit.z); outline.visible = true; }
+  else outline.visible = false;
+
+  // Day/night cycle
+  const frac = (totalTime % CFG.DAY_LEN) / CFG.DAY_LEN;
+  const ang  = frac * Math.PI * 2, sh = Math.sin(ang), dl = clamp(sh, 0, 1);
+  sunMesh.position.set(WC.x, WC.y + Math.sin(ang) * CFG.SUN_D, WC.z + Math.cos(ang) * CFG.SUN_D);
+  moonMesh.position.set(WC.x, WC.y - Math.sin(ang) * CFG.SUN_D, WC.z - Math.cos(ang) * CFG.SUN_D);
+  sunLight.position.copy(sunMesh.position); sunLight.target.position.copy(WC); sunLight.target.updateMatrixWorld();
+  sunLight.intensity = dl * 1.5; ambient.intensity = lerp(0.05, 0.4, dl);
+  let skyH, skyS, skyL;
+  if (sh > 0.2) { const t = clamp((sh-0.2)/0.8, 0, 1); skyH = lerp(0.07,0.58,t); skyS = lerp(0.8,0.65,t); skyL = lerp(0.5,0.72,t); }
+  else if (sh > -0.2) { const t = clamp((sh+0.2)/0.4, 0, 1); skyH = lerp(0.65,0.07,t); skyS = lerp(0.4,0.85,t); skyL = lerp(0.05,0.5,t); }
+  else { skyH = 0.65; skyS = 0.4; skyL = 0.05; }
+  scene.background.setHSL(skyH, skyS, skyL); scene.fog.color.copy(scene.background);
+  sunMesh.material.color.setHSL(lerp(0.06,0.13,dl), 1, lerp(0.65,0.8,dl));
+
+  // HUD (throttled)
+  hudUpdateTimer += dt;
+  if (hudUpdateTimer >= CFG.HUD_UPDATE_INTERVAL) {
+    hudUpdateTimer = 0;
+    const hpCol = health > 50 ? '#e84040' : health > 25 ? '#ff9800' : '#f44336';
+    const hgCol = hunger > 50 ? '#8bc34a' : hunger > 25 ? '#cddc39' : '#ff5722';
+    const thCol = thirst > 50 ? '#29b6f6' : thirst > 25 ? '#ff9800' : '#f44336';
+    const sl    = water ? '🌊 Swimming' : onGround ? '🟫 On land' : '🪂 Airborne';
+    const tod   = sh > 0 ? `☀️ Day ${Math.round(frac*100)}%` : `🌙 Night ${Math.round(frac*100)}%`;
+    const surfType = onGround ? getBlockBelowPlayer() : null;
+    const inLeaves = !onGround && !water && isInLeafZone();
+    const surfLine = onGround && surfType !== null
+      ? `<div style="font-size:10px;opacity:0.65;margin-top:1px">Surface: ${BLOCK_DEFS[surfType].name} (fall ×${BLK_LANDM[surfType].toFixed(2)})</div>`
+      : inLeaves ? `<div style="font-size:10px;color:#6f6;margin-top:1px">🍃 Leaves slowing fall…</div>` : '';
+    const notif = notifTimer > 0 ? `<div style="color:#aef;margin-top:4px">${notifText}</div>` : '';
+    let tornadoHud = '';
+    if (activeTornadoes.length > 0) {
+      let bestD = Infinity, bestT = null;
+      for (const t of activeTornadoes) {
+        const d = Math.hypot(pBody.position.x - t.x, pBody.position.z - t.z);
+        if (d < bestD) { bestD = d; bestT = t; }
+      }
+      if (bestT) {
+        const d = Math.round(bestD);
+        const angle = Math.atan2(bestT.z - pBody.position.z, bestT.x - pBody.position.x);
+        const arrows = ['→','↗','↑','↖','←','↙','↓','↘'];
+        const dir = arrows[Math.round(((angle*180/Math.PI + 360) % 360) / 45) % 8];
+        tornadoHud = `<div class="tornado-warn">🌪️ TORNADO ${d}m ${dir}</div>`;
+      }
+    }
+    const warn = [];
+    if (hunger < 20) warn.push('<span style="color:#ff5722">⚠ Starving!</span>');
+    if (thirst < 20) warn.push('<span style="color:#29b6f6">⚠ Dehydrated!</span>');
+
+    hudEl.innerHTML =
+      `<div>❤️ HP     ${String(Math.ceil(health)).padStart(3)} ${bar(health,100,hpCol)}</div>`+
+      `<div>🍖 Hunger ${String(Math.ceil(hunger)).padStart(3)} ${bar(hunger,100,hgCol)}</div>`+
+      `<div>💧 Thirst ${String(Math.ceil(thirst)).padStart(3)} ${bar(thirst,100,thCol)}</div>`+
+      `<div style="font-size:11px;opacity:0.8;margin-top:2px">${sl} · ${tod}</div>`+
+      surfLine + tornadoHud +
+      (warn.length ? `<div style="margin-top:2px">${warn.join(' ')}</div>` : '') + notif;
+
+    windEl.innerHTML =
+      `<div class="label">WIND / SHELTER</div>`+
+      `<div>Speed: ${windSpeed.toFixed(1)}</div>`+
+      `<div>Inside: ${localWind.toFixed(1)}</div>`+
+      `<div>Shelter: ${Math.round((1-shelter)*100)}% blocked</div>`+
+      `<div>Sealed: ${shelter <= 0 ? "yes" : "no"}</div>`+
+      `<div>Gust: ${localGust.toFixed(1)}</div>`+
+      `<div>Lift: ${Math.max(0, localGust - CFG.PLAYER_WEIGHT).toFixed(1)}</div>`+
+      `<div>Tornadoes: ${activeTornadoes.length} (T key)</div>`+
+      `<div>Dir: ${Math.round((Math.atan2(windDir.y, windDir.x)*180/Math.PI + 360) % 360)}°</div>`;
+  }
+
+  renderer.render(scene, camera);
+}
+animate();
+
+window.addEventListener("resize", () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
